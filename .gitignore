@@ -1,0 +1,19 @@
+# Session logs and anything derived from them stay local
+*.jsonl
+samples/*
+!samples/.gitkeep
+runs/*
+!runs/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# Secrets and machine files
+.env
+.env.*
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
