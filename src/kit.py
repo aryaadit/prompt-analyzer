@@ -40,7 +40,7 @@ _SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 _RUN_NAME = re.compile(r'^(?P<task>[a-z0-9][a-z0-9-]*)-(?P<version>original|lean)-(?P<run>\d+)$')
 GO_BACK = 'Go back to the prompt-analyzer window to do this, so the run stays clean.'
 CSV_COLUMNS = (
-    'practice', 'task', 'version', 'run', 'who', 'model', 'date', 'minutes', 'model_calls', 'tool_calls',
+    'practice', 'task', 'version', 'run', 'who', 'model', 'date', 'minutes', 'model_calls', 'tool_calls', 'tool_errors',
     'input_tokens', 'cache_read_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens',
     'total_usd_api_equivalent', 'cache_rebuilds', 'compacted', 'check_this', 'check_reasons', 'session_id')
 
@@ -90,8 +90,8 @@ def runs_folder(env):
 
 
 def now_text():
-    """The current local time as text, to the second."""
-    return datetime.now().astimezone().isoformat(timespec='seconds')
+    """The current local time as text, to the millisecond."""
+    return datetime.now().astimezone().isoformat(timespec='milliseconds')
 
 
 def _atomic_write(path, text):
@@ -328,17 +328,18 @@ def next_steps(details, task_dir, clipboard_ok, vscode_ok, prompt):
                   '----- END OF PROMPT (copy everything above this line) -----']
     lines += ['', 'Next steps:',
               '1. In the new VS Code window, open Claude Code and start a NEW session (a fresh chat).',
-              '2. Paste the prompt (Cmd+V on a Mac, Ctrl+V on Windows) and press Enter.',
-              '3. Do not add anything to it.',
-              '4. Do not step away until it finishes. A pause lets the saved copy of the conversation expire, '
+              '2. Check that Claude Code is on the same model as in your other runs of this task.',
+              '3. Paste the prompt (Cmd+V on a Mac, Ctrl+V on Windows) and press Enter.',
+              '4. Do not add anything to it.',
+              '5. Do not step away until it finishes. A pause lets the saved copy of the conversation expire, '
               'which makes it rebuild and changes the cost.']
     answers = task_answers(task_dir)
     if answers:
-        lines += ['5. If it asks a question, answer from this list (it is the same for every run):'] + [
+        lines += ['6. If it asks a question, answer from this list (it is the same for every run):'] + [
             '   ' + line for line in answers]
     else:
-        lines.append('5. If it asks a question, answer from task.md (experiments/tasks/%s/task.md).' % details['task'])
-    lines += ['6. When it finishes, come back to the prompt-analyzer window and say: finish my run']
+        lines.append('6. If it asks a question, answer from task.md (experiments/tasks/%s/task.md).' % details['task'])
+    lines += ['7. When it finishes, come back to the prompt-analyzer window and say: finish my run']
     return '\n'.join(lines)
 
 
@@ -366,7 +367,28 @@ def find_session(env, folder):
     return found[0]
 
 
-def session_flags(session, est):
+def tool_error_count(session):
+    """How many tool calls returned an error. Recorded in the results, but not a reason to flag the run."""
+    return sum(1 for c in session['calls'] for t in c['tool_calls'] if t['is_error'])
+
+
+def model_names(est):
+    """The models a run used, as one text (most dollars first)."""
+    return '; '.join(est['session']['models'])
+
+
+def reference_model(runs, details, model):
+    """The model of the first run of the same task, or None when this run is the first one."""
+    same_task = [d for d in read_all_details(runs) if d['task'] == details['task'] and d['name'] != details['name']
+                 and d.get('model')]
+    if not same_task:
+        return None
+    first = same_task[0]
+    mine = estimate.parse_time(details['started']) or LONG_AGO
+    return first['model'] if (estimate.parse_time(first['started']) or LONG_AGO) < mine else None
+
+
+def session_flags(session, est, model_before=None):
     """The plain reasons a run needs a second look. Empty means nothing to check."""
     reasons = []
     if est['rebuilds']:
@@ -374,16 +396,16 @@ def session_flags(session, est):
                        'changes the cost' % (est['rebuilds'], '' if est['rebuilds'] == 1 else 's'))
     if session['compaction']['compacted']:
         reasons.append('the conversation was compacted (summarized to make room)')
-    errors = sum(1 for c in session['calls'] for t in c['tool_calls'] if t['is_error'])
-    if errors:
-        reasons.append('%d tool call%s returned an error' % (errors, '' if errors == 1 else 's'))
     if session['warnings'].get('skipped_synthetic_or_error'):
-        reasons.append('the log holds an error or an interruption')
+        reasons.append('the log holds an API error or an interruption')
     main = [c for c in session['calls'] if c['source'] == 'main']
     if not main or main[-1]['stop_reason'] not in ('end_turn', 'stop_sequence'):
         reasons.append('the session did not finish (it did not end with a final answer)')
     if est['models_without_public_price']:
         reasons.append('some calls use a model with no public price, so the total is incomplete')
+    if model_before and set(model_before.split('; ')) != set(est['session']['models']):
+        reasons.append('this run used a different model (%s) from the first run of this task (%s), so the cost is '
+                       'not comparable' % (model_names(est), model_before))
     return reasons
 
 
@@ -395,9 +417,9 @@ def build_result(details, session, est, reasons):
     return {
         'practice': 'yes' if details.get('practice') else 'no', 'task': details['task'],
         'version': details['version'], 'run': details['run'], 'who': details['who'],
-        'model': '; '.join(facts['models']), 'date': started.date().isoformat() if started else '',
+        'model': model_names(est), 'date': started.date().isoformat() if started else '',
         'minutes': round(facts['duration_seconds'] / 60, 1), 'model_calls': facts['calls'],
-        'tool_calls': facts['tool_calls'], 'input_tokens': tokens['input'], 'cache_read_tokens': tokens['cache_read'],
+        'tool_calls': facts['tool_calls'], 'tool_errors': tool_error_count(session), 'input_tokens': tokens['input'], 'cache_read_tokens': tokens['cache_read'],
         'cache_write_5m_tokens': tokens['cache_write_5m'], 'cache_write_1h_tokens': tokens['cache_write_1h'],
         'output_tokens': tokens['output'], 'total_usd_api_equivalent': '%.6f' % est['totals']['transcript_usd'],
         'cache_rebuilds': est['rebuilds'], 'compacted': 'yes' if session['compaction']['compacted'] else 'no',
@@ -462,10 +484,10 @@ def command_finish(env, args, out):
     runs = runs_folder(env)
     details = find_run(runs, args.run_name) if args.run_name else pick_unfinished(runs)
     session, est, page = _build_receipt(env, details)
-    reasons = session_flags(session, est)
+    reasons = session_flags(session, est, reference_model(runs, details, model_names(est)))
     row = build_result(details, session, est, reasons)
     upsert_result(runs, row)
-    details.update({'finished': now_text(), 'session_id': est['session']['session_id'],
+    details.update({'finished': now_text(), 'model': model_names(est), 'session_id': est['session']['session_id'],
                     'total_usd': est['totals']['transcript_usd'], 'check_this': bool(reasons),
                     'check_reasons': reasons})
     write_details(runs, details)

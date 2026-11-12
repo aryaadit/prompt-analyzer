@@ -204,7 +204,7 @@ class StartTest(KitCase):
     def test_next_steps_are_in_plain_words(self):
         _, text = self.say('start', 'sample', 'original', '--who', 'Anna')
         for phrase in ('PRACTICE TASK', 'NEW session', 'Do not add anything', 'Do not step away until it finishes',
-                       'changes the cost', 'answer from this list', 'summary.md in this folder', 'finish my run'):
+                       'changes the cost', 'same model as in your other runs', 'answer from this list', 'summary.md in this folder', 'finish my run'):
             self.assertIn(phrase, text)
         self.assertNotIn('Traceback', text)
 
@@ -316,13 +316,14 @@ class FinishTest(KitCase):
         self.assertGreaterEqual(int(row['cache_rebuilds']), 1)
         self.assertIn('rebuilt', row['check_reasons'])
 
-    def test_a_compaction_an_error_and_an_unfinished_session_each_set_the_flag(self):
+    def test_a_compaction_an_api_error_and_an_unfinished_session_each_set_the_flag(self):
         boundary = json.dumps({'type': 'system', 'subtype': 'compact_boundary', 'timestamp': '2026-02-01T11:04:00.000Z',
                                'compactMetadata': {'trigger': 'auto', 'preTokens': 100, 'postTokens': 10}})
+        api_error = json.dumps({'type': 'assistant', 'isApiErrorMessage': True, 'timestamp': '2026-02-01T11:04:00.000Z',
+                                'message': {'id': 'msg_err', 'model': '<synthetic>', 'usage': {}}})
         cases = {
             'compacted': (self.edited_copy('compacted.jsonl', lambda lines: lines + [boundary]), 'compacted'),
-            'error': (self.edited_copy('error.jsonl', lambda lines: [l.replace('"is_error": false', '"is_error": true')
-                                                                    for l in lines]), 'returned an error'),
+            'api-error': (self.edited_copy('api.jsonl', lambda lines: lines[:-1] + [api_error] + lines[-1:]), 'API error'),
             'unfinished': (self.edited_copy('unfinished.jsonl', lambda lines: lines[:-1]), 'did not finish'),
         }
         for name, (path, reason) in cases.items():
@@ -335,6 +336,47 @@ class FinishTest(KitCase):
                 self.assertIn('Check this run', text)
                 self.assertIn(reason, self.results()[0]['check_reasons'])
                 shutil.rmtree(str(self.home / '.claude'), ignore_errors=True)
+
+    def test_tool_errors_are_counted_but_do_not_flag_the_run(self):
+        folder = self.start('lean')
+        path = self.edited_copy('tool-error.jsonl', lambda lines: [l.replace('"is_error": false', '"is_error": true')
+                                                                    for l in lines])
+        self.put_session(folder, path)
+        code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('Check this run', text)
+        row = self.results()[0]
+        self.assertEqual(row['check_this'], 'no')
+        self.assertGreaterEqual(int(row['tool_errors']), 1)
+
+    def finish_with_model(self, version, model):
+        """Start and finish a run whose session used the given model."""
+        folder = self.start(version)
+        path = self.edited_copy('%s-%s.jsonl' % (version, model), lambda lines: [
+            l.replace('claude-sonnet-5-5', model) for l in lines])
+        self.put_session(folder, path)
+        code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        return text
+
+    def test_a_run_on_a_different_model_from_the_first_run_is_flagged_in_plain_words(self):
+        first = self.finish_with_model('original', 'claude-sonnet-5-5')
+        self.assertNotIn('different model', first)
+        same = self.finish_with_model('lean', 'claude-sonnet-5-5')
+        self.assertNotIn('different model', same)
+        other = self.finish_with_model('lean', 'claude-opus-5-5')
+        self.assertIn('Check this run: this run used a different model (claude-opus-5-5) from the first run of this '
+                      'task (claude-sonnet-5-5)', other)
+        rows = self.results()
+        self.assertEqual([r['check_this'] for r in rows], ['no', 'no', 'yes'])
+        self.assertEqual(rows[2]['model'], 'claude-opus-5-5')
+
+    def test_refinishing_the_first_run_is_not_compared_with_a_later_one(self):
+        self.finish_with_model('original', 'claude-sonnet-5-5')
+        self.finish_with_model('lean', 'claude-opus-5-5')
+        code, text = self.say('finish', 'sample-original-1')
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('different model', text)
 
     def test_zero_sessions_stops_with_a_plain_message(self):
         self.start('lean')
