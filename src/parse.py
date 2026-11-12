@@ -9,10 +9,13 @@ import os
 import re
 from collections import Counter
 
+from .bash import analyze_command, first_word
+
 PROJECTS_ROOT = os.path.expanduser('~/.claude/projects')
 SYNTHETIC_MODEL = '<synthetic>'
-RECORD_TYPES = ('assistant', 'user', 'system', 'cost-state')
-_TYPE_RE = re.compile(r'"type"\s*:\s*"(?:assistant|user|system|cost-state)"')
+RECORD_TYPES = ('assistant', 'user', 'system', 'cost-state', 'attachment')
+_TYPE_RE = re.compile(r'"type"\s*:\s*"(assistant|user|system|cost-state|attachment)"')
+_SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 
 _KNOWN_TOOLS = (
     'Bash', 'Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Grep', 'Glob', 'WebFetch',
@@ -32,8 +35,6 @@ TARGET_KEYS = {
     'Agent': ('subagent_type', 'subagent_type'),
 }
 _MAX_TARGET_CHARS = 300
-_ENV_ASSIGNMENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
-_SAFE_WORD = re.compile(r'^[A-Za-z0-9._+-]{1,40}$')
 
 
 # ---------------------------------------------------------------- small helpers
@@ -54,14 +55,7 @@ def canonical_tool(name):
 
 def bash_first_word(command):
     """Return only the first word of a shell command, skipping VAR=value prefixes."""
-    if not isinstance(command, str):
-        return None
-    for token in command.split():
-        if _ENV_ASSIGNMENT.match(token):
-            continue
-        word = os.path.basename(token.lstrip('({!`'))
-        return word if _SAFE_WORD.match(word) else '?'
-    return None
+    return first_word(command)
 
 
 def tool_target(tool, tool_input):
@@ -117,10 +111,11 @@ def _result_size(content):
 # ---------------------------------------------------------------- one file
 
 def iter_records(path, counters):
-    """Yield (line_no, record) for assistant, user, system, and cost-state lines of one file."""
+    """Yield (line_no, record) for the record types we use. Attachments only if they are queued prompts."""
     with open(path, encoding='utf-8', errors='replace') as handle:
         for line_no, line in enumerate(handle):
-            if not _TYPE_RE.search(line):
+            match = _TYPE_RE.search(line)
+            if not match or (match.group(1) == 'attachment' and 'queued_command' not in line):
                 continue
             try:
                 record = json.loads(line)
@@ -180,11 +175,15 @@ def _merge_assistant(call, record, message, counters):
         if not isinstance(tool_use_id, str) or tool_use_id in known:
             continue
         tool = canonical_tool(block.get('name'))
-        target, kind = tool_target(tool, block.get('input'))
+        tool_input = block.get('input')
+        target, kind = tool_target(tool, tool_input)
+        bash = None
+        if tool == 'Bash':  # the command itself is never kept, only its classification
+            bash = analyze_command(tool_input.get('command') if isinstance(tool_input, dict) else None)
         call['tool_calls'].append({
             'tool_use_id': tool_use_id, 'tool': tool, 'target': target, 'target_kind': kind,
             'result_chars': None, 'result_nontext_blocks': None, 'is_error': None,
-            'spawned_agent_id': None,
+            'spawned_agent_id': None, 'spawned_workflow_id': None, 'bash': bash,
         })
         known.add(tool_use_id)
 
@@ -210,23 +209,78 @@ def _add_assistant(state, record, line_no):
     _merge_assistant(call, record, message, state['counters'])
 
 
-def _add_results(state, record):
-    """Handle one user record: store the size and error flag of each tool_result block."""
+def _safe_id(value):
+    """Return value if it looks like a plain id (letters, digits, - and _), else None."""
+    return value if isinstance(value, str) and _SAFE_ID.match(value) else None
+
+
+def _workflow_id(result):
+    """The workflow folder name a Workflow tool result points to (from transcriptDir or runId)."""
+    if not isinstance(result, dict):
+        return None
+    folder = result.get('transcriptDir')
+    if isinstance(folder, str) and folder:
+        return _safe_id(os.path.basename(folder.rstrip('/\\')))
+    return _safe_id(result.get('runId'))
+
+
+def _add_user(state, record):
+    """Handle one user record: store tool-result sizes, or note a typed prompt's length."""
     message = record.get('message')
     content = message.get('content') if isinstance(message, dict) else None
     result = record.get('toolUseResult')
-    agent_id = result.get('agentId') if isinstance(result, dict) else None
+    agent_id = _safe_id(result.get('agentId')) if isinstance(result, dict) else None
+    workflow_id = _workflow_id(result)
+    found_result = False
     for block in content if isinstance(content, list) else []:
         if not isinstance(block, dict) or block.get('type') != 'tool_result':
             continue
+        found_result = True
         tool_use_id = block.get('tool_use_id')
         if not isinstance(tool_use_id, str):
             continue
         chars, other = _result_size(block.get('content'))
         state['results'][tool_use_id] = {
             'chars': chars, 'nontext_blocks': other, 'is_error': bool(block.get('is_error')),
-            'agent_id': agent_id if isinstance(agent_id, str) else None,
+            'agent_id': agent_id, 'workflow_id': workflow_id,
         }
+    if not found_result:
+        _add_prompt(state, record, content)
+
+
+def _prompt_kind(record):
+    """'summary' for a compaction summary, None for harness-injected text, else 'typed'."""
+    if record.get('isCompactSummary'):
+        return 'summary'
+    origin = record.get('origin')
+    origin_kind = origin.get('kind') if isinstance(origin, dict) else None
+    if record.get('isMeta') or (isinstance(origin_kind, str) and origin_kind != 'human'):
+        return None
+    return 'typed'
+
+
+def _add_prompt(state, record, content, kind=None):
+    """Note the length (never the text) of a typed prompt or a compaction summary."""
+    kind = kind or _prompt_kind(record)
+    if kind is None:
+        return
+    chars, images = _result_size(content)
+    stamp = record.get('timestamp')
+    state['prompts'].append({
+        'timestamp': stamp if isinstance(stamp, str) else '', 'chars': chars, 'images': images,
+        'kind': kind, 'source': state['source'], 'agent_id': state['agent_id'],
+        'segment': len(state['boundaries']) if state['source'] == 'main' else None,
+    })
+
+
+def _add_attachment(state, record):
+    """A prompt typed while the agent was busy arrives as a queued_command attachment."""
+    attachment = record.get('attachment')
+    if not isinstance(attachment, dict) or attachment.get('type') != 'queued_command':
+        return
+    if attachment.get('commandMode') == 'prompt':
+        stamped = dict(record, timestamp=attachment.get('timestamp') or record.get('timestamp'))
+        _add_prompt(state, stamped, attachment.get('prompt'), kind='typed')
 
 
 def _add_boundary(state, record):
@@ -271,20 +325,26 @@ def parse_cost_state(record):
             'models': models}
 
 
-def parse_file(path, source, agent_id=None):
-    """Stream one log file. Return its calls, tool results, compact boundaries, cost-states."""
-    state = {'source': source, 'agent_id': agent_id, 'calls': {}, 'results': {},
-             'boundaries': [], 'cost_states': [], 'counters': Counter()}
+def parse_file(path, source, agent_id=None, workflow_id=None):
+    """Stream one log file. Return its calls, results, prompts, boundaries, and cost-states."""
+    state = {'source': source, 'agent_id': agent_id, 'calls': {}, 'results': {}, 'prompts': [],
+             'boundaries': [], 'cost_states': [], 'counters': Counter(), 'cwd': None}
     for line_no, record in iter_records(path, state['counters']):
         kind = record['type']
+        if state['cwd'] is None and isinstance(record.get('cwd'), str):
+            state['cwd'] = record['cwd']
         if kind == 'assistant':
             _add_assistant(state, record, line_no)
         elif kind == 'user':
-            _add_results(state, record)
+            _add_user(state, record)
         elif kind == 'system':
             _add_boundary(state, record)
+        elif kind == 'attachment':
+            _add_attachment(state, record)
         elif kind == 'cost-state' and source == 'main':
             state['cost_states'].append(parse_cost_state(record))
+    for call in state['calls'].values():
+        call['workflow_id'] = workflow_id
     return state
 
 
@@ -313,6 +373,8 @@ def _attach_results(calls, results):
             tool_call['is_error'] = result['is_error']
             if tool_call['tool'] == 'Agent':
                 tool_call['spawned_agent_id'] = result['agent_id']
+            elif tool_call['tool'] == 'Workflow':
+                tool_call['spawned_workflow_id'] = result['workflow_id']
 
 
 def _assign_segments(calls, boundaries):
@@ -335,7 +397,8 @@ def parse_session(path):
     """Parse a top-level session file and its subagent files into one normalized dict."""
     main = parse_file(path, 'main')
     agent_files = find_agent_files(path)
-    parts = [main] + [parse_file(p, 'subagent', agent_id) for agent_id, p, _ in agent_files]
+    parts = [main] + [parse_file(p, 'subagent', agent_id, os.path.basename(os.path.dirname(p)) if is_wf else None)
+                      for agent_id, p, is_wf in agent_files]
     calls, results, counters, sub_boundaries = {}, {}, Counter(), 0
     for part in parts:
         results.update(part['results'])
@@ -347,6 +410,7 @@ def parse_session(path):
             else:
                 calls[message_id] = call
     call_list = list(calls.values())
+    prompts = sorted((pr for part in parts for pr in part['prompts']), key=lambda pr: pr['timestamp'])
     _assign_segments(call_list, main['boundaries'])
     _attach_results(call_list, results)
     _order_calls(call_list)
@@ -356,7 +420,9 @@ def parse_session(path):
         'file_name': os.path.basename(path),
         'files': {'main': 1, 'subagent': sum(1 for _, _, wf in agent_files if not wf),
                   'workflow': sum(1 for _, _, wf in agent_files if wf)},
+        'cwd': main['cwd'],
         'calls': call_list,
+        'prompts': prompts,
         'segments': _segments(main['boundaries']),
         'compaction': {'main_boundaries': len(main['boundaries']),
                        'subagent_boundaries': sub_boundaries,

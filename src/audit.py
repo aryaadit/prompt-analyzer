@@ -2,14 +2,18 @@
 
     python3 -m src.audit gap      # gap between session totals and the transcript, in dollars
     python3 -m src.audit prices   # per-call dollars versus cost-state costUSD
+    python3 -m src.audit receipts # build every receipt in memory (no files); sum-back, Bash coverage, timing
     python3 -m src.audit all
 
 Prints counts, token numbers, and dollars only. Reads logs, never writes to them.
 """
 import argparse
+import os
 import sys
+import time
+from collections import Counter
 
-from . import parse, prices, reconcile
+from . import estimate, parse, prices, reconcile
 
 
 def load_all(root):
@@ -150,12 +154,48 @@ def print_validated_models(items, entries):
         '%s: %s' % (r['model'], r['status']) for r in todo)))
 
 
+def print_receipts(root):
+    """Build every receipt in memory, writing nothing, and report how well that went."""
+    built, failed, worst, bash, timing = 0, Counter(), 0.0, Counter(), []
+    skipped = rebuilds = 0
+    paths = parse.list_sessions(root)
+    for path in paths:
+        started = time.time()
+        try:
+            session = parse.parse_session(path)
+            parsed = time.time()
+            est = estimate.build_estimate(session)
+        except estimate.ReceiptError as error:
+            failed[str(error)] += 1
+            continue
+        done = time.time()
+        built += 1
+        worst = max(worst, est['sum_back']['difference_usd'], est['sum_back']['kind_lines_difference_usd'])
+        bash.update(est['bash']['by_kind'])
+        skipped, rebuilds = skipped + est['skipped_pairs'], rebuilds + est['rebuilds']
+        timing.append((len(session['calls']), parsed - started, done - parsed, os.path.getsize(path)))
+    total = sum(bash.values())
+    print('RECEIPTS: every session built in memory, no files written')
+    print('sessions %d: built %d, could not build %d %s' % (len(paths), built, sum(failed.values()), dict(failed)))
+    print('largest sum-back difference: $%.3e (tolerance $1e-06)' % worst)
+    print('Bash calls %d; left as "other command": %d = %.2f%%' % (total, bash[estimate.bash.OTHER],
+                                                                100 * bash[estimate.bash.OTHER] / total if total else 0))
+    print('pairs skipped for negative growth: %d; calls flagged "cache rebuilt": %d' % (skipped, rebuilds))
+    if timing:
+        calls, t_parse, t_est, size = max(timing)
+        print('largest session: %d calls, %.1f MB; parse %.2fs + estimate %.2fs = %.2fs'
+              % (calls, size / 1e6, t_parse, t_est, t_parse + t_est))
+
+
 def main(argv=None):
     """Run the requested audit over every session under the projects folder."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('what', choices=('gap', 'prices', 'all'))
+    parser.add_argument('what', choices=('gap', 'prices', 'receipts', 'all'))
     parser.add_argument('--root', default=parse.PROJECTS_ROOT)
     args = parser.parse_args(argv)
+    if args.what == 'receipts':
+        print_receipts(args.root)
+        return 0
     entries, items, sessions = load_all(args.root)
     if args.what in ('gap', 'all'):
         print_gap(entries, sessions)

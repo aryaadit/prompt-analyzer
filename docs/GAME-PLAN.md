@@ -70,7 +70,7 @@ Everything the agent reads stays in the conversation and is sent again on every 
 - The idea is chosen and entered on the class sheet.
 - A private code repository exists at [github.com/aryaadit/prompt-analyzer](https://github.com/aryaadit/prompt-analyzer). Anna and Reid need to send Adit their GitHub usernames to get access.
 - We mapped how Claude Code records a session. Token counts are exact for each model call. They are not recorded per file or per tool, so per-step costs will be estimates, and the receipt will label them that way.
-- The first piece of code is built and tested: a parser, a price table, and a plain-text cost summary for one session.
+- The code is built and tested: a parser, a price table, a plain-text cost summary, and the receipt page (one HTML file, with the diagnosis). Run `python3 -m src.receipt --session latest`, or open docs/demo-receipt.html, which uses made-up data and is safe for slides.
 - Claude Code's own session totals are sometimes higher than the sum of the calls in the log. We measured the gap. It is about half a percent of dollars in ordinary sessions and about 10 percent in long sessions that were compacted.
 
 ## What the logs taught us
@@ -165,10 +165,12 @@ Each step is one prompt and one agent session.
 - Prompt 1, repository setup: done.
 - Prompt 2, map the log format: done. The output is docs/SCHEMA.md.
 - Prompt 3, parser, price table, and plain-text summary: done on November 12.
-- Prompt 4, per-step estimates and the one-page receipt: next. Not yet written.
-- Prompt 5, diagnosis and the lean prompt writer, packaged as a skill: planned.
-- Prompt 6, automated rematch runner: optional. The experiment can run without it.
-- Prompt 7, clean-up for the demo: redaction, sample data, and the README.
+- Prompt 4, per-step estimates, the receipt page, and a demo receipt: done on November 12. See prompts/04-receipt.md and docs/METHOD.md. Open docs/demo-receipt.html to see the page.
+- Prompt 5, the teammate kit: a setup check, plain-English commands, and a run starter. Before November 14.
+- Prompt 6, the experiment board and the task sheets. Before November 14.
+- Prompt 7, the lean prompt writer, which reads the receipt's findings. Before November 14.
+- Prompt 8, clean-up for the demo: redaction and the README. After December 1.
+- The automated rematch runner is dropped unless time allows. Runs are done by hand with the run starter.
 
 ## Timeline and owners
 

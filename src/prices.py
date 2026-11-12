@@ -130,6 +130,26 @@ def price_call(call):
         web_searches=call.get('web_search_requests', 0))
 
 
+def price_components(call):
+    """Dollars per token type for one call, or None when the model has no public price.
+
+    Uses the same rates and modifiers as price_call, so the parts add up to price_call exactly.
+    The key 'fees' holds web search fees. Used to split a call's bill between its parts.
+    """
+    tokens = call['tokens']
+    rates = rates_for(call['model'], prompt_size(tokens), True)
+    if rates is None:
+        return None
+    multiplier = 1.0
+    if call.get('speed') == 'fast' and canonical_model(call['model']) in FAST_MODELS:
+        multiplier *= FAST_MULTIPLIER
+    if call.get('inference_geo') == 'us':
+        multiplier *= US_GEO_MULTIPLIER
+    parts = {kind: tokens[kind] * rates[kind] / 1_000_000 * multiplier for kind in TOKEN_TYPES}
+    parts['fees'] = call.get('web_search_requests', 0) * WEB_SEARCH_USD
+    return parts
+
+
 def price_aggregate(model, tokens, cache_write='split'):
     """Dollars for summed tokens at base prices. Prompt-size tiers cannot be applied to totals."""
     return price_tokens(model, tokens, cache_write=cache_write, long_context=False)

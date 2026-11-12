@@ -74,7 +74,7 @@ When you finish:
 - Commit, and ask before pushing.
 ```
 
-## What prompt 4 will add (not yet written)
+## What prompt 4 adds (see prompts/04-receipt.md)
 
 - Estimated tokens per tool result, using the growth method from SCHEMA.md section 10.
 - Carried cost: how many later calls re-read each result, and what that cost.
