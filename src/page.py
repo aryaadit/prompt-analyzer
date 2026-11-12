@@ -239,12 +239,22 @@ def collapsible(sec_id, question, answer, body):
 
 # ---------------------------------------------------------------- the chart library
 
-def vendored_sha256():
+def vendored_sha256(readme=None):
     """The SHA-256 that vendor/README.md records for echarts.min.js."""
-    found = re.search(r'SHA-256 of echarts\.min\.js \| `([0-9a-f]{64})`', VENDOR_README.read_text(encoding='utf-8'))
+    found = re.search(r'SHA-256 of echarts\.min\.js \| `([0-9a-f]{64})`', (readme or VENDOR_README).read_text(encoding='utf-8'))
     if not found:
         raise PageError('vendor/README.md does not record a SHA-256 for echarts.min.js')
     return found.group(1)
+
+
+def vendor_matches(vendor_dir):
+    """True when echarts.min.js in vendor_dir has the SHA-256 that the README beside it records. A missing or
+    unreadable file, or a README without a checksum, counts as not matching."""
+    vendor_dir = Path(vendor_dir)
+    try:
+        return hashlib.sha256((vendor_dir / 'echarts.min.js').read_bytes()).hexdigest() == vendored_sha256(vendor_dir / 'README.md')
+    except (OSError, PageError):
+        return False
 
 
 class PageError(Exception):

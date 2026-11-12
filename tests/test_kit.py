@@ -2,6 +2,7 @@
 or spends model usage, and none touches the network. Every session here is an invented fixture. Only the share
 tests run a command: local git, in temporary repos."""
 import csv
+import hashlib
 import html
 import io
 import json
@@ -14,11 +15,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from src import kit, parse, paths, receipt
+from src import kit, page as pagelib, parse, paths, receipt
 from tests.helpers import SESSION_3
 from tests.make_demo_session import write_demo_session
 
 REPO_SAMPLE = Path(kit.REPO) / 'experiments' / 'tasks' / 'sample'
+FAKE_LIBRARY = b'/* a made-up chart library */\nwindow.echarts = {};\n'
+
+
+def make_vendor(repo, library=FAKE_LIBRARY):
+    """A vendor/ folder with a made-up library and a README that records its SHA-256, as the real one does."""
+    folder = Path(repo) / 'vendor'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'echarts.min.js').write_bytes(library)
+    (folder / 'README.md').write_text('| SHA-256 of echarts.min.js | `%s` |\n' % hashlib.sha256(library).hexdigest(), encoding='utf-8')
 WINDOWS_CWD = 'C:\\Users\\Anna\\prompt-analyzer-scratch\\sample-lean-1'
 WINDOWS_FOLDER = 'C--Users-Anna-prompt-analyzer-scratch-sample-lean-1'
 
@@ -33,6 +43,7 @@ class KitCase(unittest.TestCase):
         self.home, self.repo = base / 'home', base / 'repo'
         self.home.mkdir()
         shutil.copytree(str(REPO_SAMPLE), str(self.repo / 'experiments' / 'tasks' / 'sample'))
+        make_vendor(self.repo)
         self.env = kit.Env(home=self.home, repo=self.repo)
         self.runs = self.home / kit.DEFAULT_SCRATCH_NAME  # the scratch folder
         self.results_dir = self.repo / kit.RESULTS_DIR
@@ -150,6 +161,15 @@ class CheckTest(KitCase):
         self.mocks['git'].side_effect = lambda env, *args, **kw: (0, 'true') if args[0] == 'rev-parse' else (1, '')
         _, text = self.say('check')
         self.assertIn('could not reach GitHub', text)
+
+    def test_a_chart_library_that_does_not_match_its_checksum_is_a_fix_that_says_how_to_repair_it(self):
+        self.make_session()
+        (self.repo / 'vendor' / 'echarts.min.js').write_bytes(FAKE_LIBRARY.replace(b'\n', b'\r\n'))
+        code, text = self.say('check')
+        self.assertEqual(code, 1)
+        self.assertIn('FIX: The chart library file vendor/echarts.min.js does not match its checksum', text)
+        self.assertIn('Say "update the tool" to repair it.', text)
+        self.assertIn('Not ready', text)
 
     def test_an_old_python_is_a_fix(self):
         self.make_session()
@@ -775,7 +795,8 @@ class UpdateTest(KitCase):
         self.assertEqual(code, 0)
         self.assertIn('Already up to date.', text)
         self.assertIn(('pull', '--ff-only'), calls)
-        self.assertTrue(all(c[0] in ('status', 'pull') for c in calls))
+        self.assertTrue(all(c[0] in ('status', 'pull', '-c') for c in calls))  # the library matches, so nothing is restored
+        self.assertFalse([c for c in calls if 'checkout-index' in c])
 
 
 # ---------------------------------------------------------------- what the run made, and the shared results
@@ -948,6 +969,176 @@ class SharedResultsTest(KitCase):
         self.assertEqual(code, 0, text)
         self.assertIn('Anna', text)
         self.assertEqual([d['name'] for d in kit.read_all_details(self.env)], ['sample-lean-1-anna'])
+
+
+@unittest.skipUnless(shutil.which('git'), 'git is not installed')
+class LineEndingTest(unittest.TestCase):
+    """The Windows bug: git for Windows converts line endings on checkout (core.autocrlf), which changed the bytes of
+    vendor/echarts.min.js, so its SHA-256 stopped matching. Real git with core.autocrlf=true converts the same way on any
+    machine, so the bug is reproduced here, in temporary repos and with no network."""
+
+    LIBRARY = Path(kit.REPO) / 'vendor' / 'echarts.min.js'
+    README = Path(kit.REPO) / 'vendor' / 'README.md'
+    RULES = Path(kit.REPO) / '.gitattributes'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.git_in(self.base, 'init', '--bare', '-b', 'main', 'github.git')
+        self.maintainer = self.clone('maintainer')
+        (self.maintainer / 'vendor').mkdir()
+        shutil.copy(str(self.LIBRARY), str(self.maintainer / 'vendor' / 'echarts.min.js'))
+        shutil.copy(str(self.README), str(self.maintainer / 'vendor' / 'README.md'))
+        for name in ('tests/fixtures/-work-demo/one.jsonl', 'experiments/tasks/t/start/a.txt'):
+            (self.maintainer / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.maintainer / name).write_bytes(b'line one\nline two\n')
+        self.git_in(self.maintainer, 'add', '.')
+        self.git_in(self.maintainer, 'commit', '-m', 'before the rules')
+        self.git_in(self.maintainer, 'push', '-u', 'origin', 'main')
+
+    def git_in(self, folder, *args):
+        done = subprocess.run(['git'] + list(args), cwd=str(folder), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def clone(self, name, windows=False):
+        """A clone. With windows=True it is made the way git for Windows makes one: core.autocrlf=true."""
+        flags = ['-c', 'core.autocrlf=true'] if windows else []
+        self.git_in(self.base, 'clone', *flags, str(self.base / 'github.git'), name)
+        folder = self.base / name
+        self.git_in(folder, 'config', 'user.name', name)
+        self.git_in(folder, 'config', 'user.email', name + '@example.com')
+        return folder
+
+    def publish_rules(self):
+        shutil.copy(str(self.RULES), str(self.maintainer / '.gitattributes'))
+        self.git_in(self.maintainer, 'add', '.gitattributes')
+        self.git_in(self.maintainer, 'commit', '-m', 'Keep git from changing line endings')
+        self.git_in(self.maintainer, 'push')
+
+    def update(self, folder):
+        out = io.StringIO()
+        env = kit.Env(home=self.base / 'home', repo=folder)
+        code = kit.main(['update'], out=out, env=env, cwd=folder)
+        return code, out.getvalue()
+
+    def matches(self, folder):
+        return pagelib.vendor_matches(folder / 'vendor')
+
+    def test_the_bug_is_reproduced_without_the_rules(self):
+        """The control: with no .gitattributes, a clone made with core.autocrlf=true has Windows line endings in the library."""
+        anna = self.clone('anna', windows=True)
+        data = (anna / 'vendor' / 'echarts.min.js').read_bytes()
+        self.assertIn(b'\r\n', data)
+        self.assertNotEqual(data, self.LIBRARY.read_bytes())
+        self.assertFalse(self.matches(anna))
+
+    def test_with_the_rules_a_clone_made_with_autocrlf_keeps_the_exact_bytes_and_the_check_passes(self):
+        self.publish_rules()
+        anna = self.clone('anna', windows=True)
+        self.assertEqual(self.git_in(anna, 'config', 'core.autocrlf'), 'true')
+        self.assertEqual((anna / 'vendor' / 'echarts.min.js').read_bytes(), self.LIBRARY.read_bytes())
+        self.assertEqual((anna / 'vendor' / 'echarts.min.js').read_bytes().count(b'\r'), 0)
+        self.assertTrue(self.matches(anna))
+        ok, text = kit.check_demo(kit.Env(home=self.base / 'home', repo=anna))
+        self.assertTrue(ok, text)
+        for name in ('tests/fixtures/-work-demo/one.jsonl', 'experiments/tasks/t/start/a.txt'):
+            self.assertEqual((anna / name).read_bytes(), b'line one\nline two\n', name)
+
+    def test_the_real_rules_cover_every_byte_exact_path(self):
+        rules = {line.split()[0]: line.split()[1:] for line in self.RULES.read_text(encoding='utf-8').splitlines()
+                 if line.strip() and not line.startswith('#')}
+        self.assertEqual(rules['vendor/**'], ['binary'])
+        self.assertEqual(rules['docs/demo-receipt.html'], ['binary'])
+        self.assertEqual(rules['tests/fixtures/**'], ['-text'])
+        self.assertEqual(rules['experiments/tasks/**'], ['-text'])
+        for path in kit.BYTE_EXACT_PATHS:
+            self.assertTrue(any(rule.startswith(path) for rule in rules), path)
+
+    def test_update_repairs_an_existing_clone_and_says_what_it_did(self):
+        anna = self.clone('anna', windows=True)  # cloned before the rules existed, so the library has Windows line endings
+        self.assertFalse(self.matches(anna))
+        self.publish_rules()
+        code, text = self.update(anna)
+        self.assertEqual(code, 0, text)
+        self.assertIn('Updated to the latest version.', text)
+        self.assertIn('The chart library file (vendor/echarts.min.js) did not match its checksum. Windows had changed its '
+                      'line endings when the project was copied. I restored it from git, and it matches now.', text)
+        self.assertIn('I also found 2 files that must stay exactly as they are (such as the task start files) whose line '
+                      'endings Windows had changed. I restored them from git.', text)
+        self.assertTrue(self.matches(anna))
+        self.assertEqual((anna / 'vendor' / 'echarts.min.js').read_bytes(), self.LIBRARY.read_bytes())
+        self.assertEqual((anna / 'experiments/tasks/t/start/a.txt').read_bytes(), b'line one\nline two\n')
+        self.assertEqual(self.git_in(anna, 'status', '--porcelain'), '')
+        again_code, again = self.update(anna)  # nothing is wrong now, so it says nothing more
+        self.assertEqual((again_code, again.strip()), (0, 'Already up to date.'))
+
+    def test_update_repairs_a_clone_that_is_already_up_to_date_but_still_broken(self):
+        self.publish_rules()
+        anna = self.clone('anna', windows=True)
+        (anna / 'vendor' / 'echarts.min.js').write_bytes(self.LIBRARY.read_bytes().replace(b'\n', b'\r\n'))
+        self.assertFalse(self.matches(anna))
+        code, text = self.update(anna)
+        self.assertEqual(code, 0, text)
+        self.assertIn('Already up to date.', text)
+        self.assertIn('I restored it from git, and it matches now.', text)
+        self.assertTrue(self.matches(anna))
+
+    def test_it_restores_only_the_byte_exact_files_that_windows_changed(self):
+        anna = self.clone('anna', windows=True)
+        self.publish_rules()
+        mine = anna / 'my-notes.txt'
+        mine.write_bytes(b'a file of my own\r\n')  # untracked, and not a byte-exact path: never touched
+        start_file = anna / 'experiments' / 'tasks' / 't' / 'start' / 'a.txt'
+        self.assertIn(b'\r\n', start_file.read_bytes())
+        code, text = self.update(anna)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(mine.read_bytes(), b'a file of my own\r\n')
+        self.assertEqual(start_file.read_bytes(), b'line one\nline two\n')
+        self.assertEqual(kit.damaged_line_endings(kit.Env(home=self.base / 'home', repo=anna)), [])
+
+    def test_task_start_files_are_repaired_even_when_the_library_is_fine(self):
+        self.publish_rules()
+        anna = self.clone('anna', windows=True)
+        start_file = anna / 'experiments' / 'tasks' / 't' / 'start' / 'a.txt'
+        start_file.write_bytes(b'line one\r\nline two\r\n')
+        self.assertTrue(self.matches(anna))
+        code, text = self.update(anna)
+        self.assertEqual(code, 0, text)
+        self.assertIn('Windows had changed the line endings of 1 file that must stay exactly as it is (such as the task '
+                      'start files). I restored it from git.', text)
+        self.assertNotIn('chart library', text)
+        self.assertEqual(start_file.read_bytes(), b'line one\nline two\n')
+
+    def test_a_real_edit_in_a_byte_exact_file_still_stops_the_update(self):
+        self.publish_rules()
+        anna = self.clone('anna', windows=True)
+        start_file = anna / 'experiments' / 'tasks' / 't' / 'start' / 'a.txt'
+        start_file.write_bytes(b'line one\nline two\nand my own line\n')  # Unix line endings, so not Windows damage
+        code, text = self.update(anna)
+        self.assertEqual(code, 2)
+        self.assertIn('1 changed file', text)
+        self.assertEqual(start_file.read_bytes(), b'line one\nline two\nand my own line\n')
+
+    def test_a_library_that_still_does_not_match_after_the_restore_is_a_plain_error(self):
+        anna = self.clone('anna', windows=True)
+        (self.maintainer / 'vendor' / 'README.md').write_text('| SHA-256 of echarts.min.js | `%s` |\n' % ('0' * 64), encoding='utf-8')
+        self.git_in(self.maintainer, 'commit', '-am', 'a wrong checksum')
+        self.git_in(self.maintainer, 'push')
+        code, text = self.update(anna)
+        self.assertEqual(code, 2)
+        self.assertIn('restoring it from git did not fix it', text)
+        self.assertIn('Tell Adit.', text)
+        self.assertNotIn('Traceback', text)
+
+    def test_local_changes_still_stop_the_update_before_anything_is_restored(self):
+        anna = self.clone('anna', windows=True)
+        (anna / 'vendor' / 'README.md').write_text('my own edit\n', encoding='utf-8')
+        code, text = self.update(anna)
+        self.assertEqual(code, 2)
+        self.assertIn('changed nothing', text)
+        self.assertEqual((anna / 'vendor' / 'README.md').read_text(encoding='utf-8'), 'my own edit\n')
 
 
 @unittest.skipUnless(shutil.which('git'), 'git is not installed')

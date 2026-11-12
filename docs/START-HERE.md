@@ -93,7 +93,9 @@ All dollar amounts are API-equivalent: tokens times public API prices. Nobody is
 
 ## If something goes wrong
 
-1. **The setup check shows a FIX line.** Do what the line says. If it says you are behind, type "update the tool".
+1. **The setup check shows a FIX line.** Do what the line says. If it says you are behind, or that the chart
+   library file does not match its checksum, type "update the tool" (on Windows it repairs the file, because
+   Windows can change a file's line endings when the project is copied, and says so).
    If it says Git or Python is missing, install it (steps 3 and 4 above), restart VS Code, and type "check my
    setup" again.
 2. **The new window did not open, or the prompt is not on your clipboard.** The chat panel prints the folder

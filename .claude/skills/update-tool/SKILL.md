@@ -10,7 +10,9 @@ allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m s
 Run `python3 -m src.kit update`. It checks for changes of the user's own, stops if there are any, and
 otherwise runs a plain `git pull --ff-only`.
 
-Show what it prints. If it stopped because of local changes, say in plain words that nothing was changed and
+Show what it prints. If it says it restored files because Windows had changed their line endings, relay that in
+plain words: it is a repair the tool did on purpose, nothing is wrong, and nothing needs doing. If it says the
+restore did not fix it, tell the user to text Adit with a screenshot. If it stopped because of local changes, say in plain words that nothing was changed and
 that the user should text Adit before updating. Do not stash, reset, discard, or force anything yourself. After
 a successful update, suggest "check my setup".
 

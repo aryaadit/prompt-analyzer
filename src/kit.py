@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import webbrowser
 from collections import Counter
 from datetime import datetime, timezone
@@ -783,6 +784,71 @@ def command_runs(env, args, out):
     return 0
 
 
+# The paths that .gitattributes keeps from line-ending conversion: files the code hashes or compares byte for byte.
+BYTE_EXACT_PATHS = ('vendor', 'docs/demo-receipt.html', 'tests/fixtures', 'experiments/tasks')
+
+
+def damaged_line_endings(env):
+    """Files under BYTE_EXACT_PATHS that git stores with Unix line endings but whose copy on this machine has Windows
+    ones (git for Windows converts them on checkout). Empty when git cannot say."""
+    damaged = []
+    for line in _git_lines(env, 'ls-files', '--eol', '--', *BYTE_EXACT_PATHS) or []:
+        info, _, path = line.partition('\t')
+        fields = info.split()
+        if len(fields) >= 2 and fields[0] == 'i/lf' and fields[1] in ('w/crlf', 'w/mixed'):
+            damaged.append(path)
+    return damaged
+
+
+def restore_from_git(env, files):
+    """Rewrite files (paths inside the repo) from what git stores, under the current .gitattributes. Plain
+    "git checkout -- path" and "checkout-index --force" both skip a file that looks unchanged to git (its size and time
+    still match what git recorded), and a file with changed line endings looks exactly like that. So git writes
+    the files to a temporary folder, and each one is moved into place. Returns True when every file was restored."""
+    with tempfile.TemporaryDirectory() as temp:
+        done = git(env, 'checkout-index', '--force', '--prefix=%s/' % Path(temp).as_posix(), '--', *files)
+        if done is None or done[0] != 0:
+            return False
+        for name in files:
+            source, target = Path(temp) / name, env.repo / name
+            if not source.is_file():
+                return False
+            partial = target.with_name(target.name + '.tmp')
+            shutil.copyfile(str(source), str(partial))
+            os.replace(str(partial), str(target))
+    # Git keeps listing these files as modified, though they now match what it stores, until they are added again.
+    # The content is identical to what is committed, so this stages nothing; it only refreshes git's record of the files.
+    git(env, 'add', '--', *files)
+    return True
+
+
+def repair_line_endings(env):
+    """Put back files whose line endings Windows changed. If vendor/echarts.min.js does not match its checksum, restore
+    vendor/ from git and check again. Also restore any other byte-exact file whose line endings were changed the same
+    way. Returns plain sentences about what was done ([] when nothing was wrong). Raises KitError when the library
+    still does not match. The caller has already stopped if the folder had changes of its own."""
+    library_bad = not pagelib.vendor_matches(env.repo / 'vendor')
+    damaged = damaged_line_endings(env)
+    others = [p for p in damaged if not (library_bad and p.startswith('vendor/'))]
+    if not library_bad and not others:
+        return []
+    files = (_git_lines(env, 'ls-files', '--', 'vendor') or [] if library_bad else []) + others
+    if not files or not restore_from_git(env, files) or not pagelib.vendor_matches(env.repo / 'vendor'):
+        raise KitError('The chart library file vendor/echarts.min.js does not match its checksum, and restoring it '
+                       'from git did not fix it. Nothing else was changed. Tell Adit.')
+    notes = []
+    if library_bad:
+        notes.append('The chart library file (vendor/echarts.min.js) did not match its checksum. Windows had changed its line '
+                     'endings when the project was copied. I restored it from git, and it matches now.')
+    if others:
+        count, many = len(others), len(others) != 1
+        what = '%d file%s that must stay exactly as %s (such as the task start files)' % (
+            count, 's' if many else '', 'they are' if many else 'it is')
+        notes.append(('I also found %s whose line endings Windows had changed. I restored %s from git.' if library_bad else
+                      'Windows had changed the line endings of %s. I restored %s from git.') % (what, 'them' if many else 'it'))
+    return notes
+
+
 def command_update(env, args, out):
     """kit update: pull the latest version of the tool. Stops if there are local changes. Never forces."""
     changed = git(env, 'status', '--porcelain', '--untracked-files=no')
@@ -790,15 +856,20 @@ def command_update(env, args, out):
         raise KitError('Git is not installed, or VS Code cannot find it, so I cannot update. Say "check my setup".')
     if changed[0] != 0:
         raise KitError('This folder is not a copy cloned from GitHub, so I cannot update it. Tell Adit.')
-    if changed[1]:
-        count = len(changed[1].splitlines())
+    dirty = changed[1].splitlines()
+    if dirty:  # a file that only Windows changed (its line endings) is not a change of the teammate's own
+        damaged = set(damaged_line_endings(env))
+        dirty = [line for line in dirty if line.split(None, 1)[-1] not in damaged]
+    if dirty:
         raise KitError('You have %d changed file%s in this folder, so I stopped and changed nothing. Tell Adit '
-                       'before you update.' % (count, '' if count == 1 else 's'))
+                       'before you update.' % (len(dirty), '' if len(dirty) == 1 else 's'))
     pulled = git(env, 'pull', '--ff-only')
     if pulled[0] != 0:
         raise KitError('The update did not work and nothing was changed. Check your internet connection and that VS '
                        'Code is signed in to GitHub, then try again. If it keeps failing, tell Adit.')
     print('Already up to date.' if 'up to date' in pulled[1].lower() else 'Updated to the latest version.', file=out)
+    for note in repair_line_endings(env):
+        print(note, file=out)
     return 0
 
 
@@ -941,9 +1012,11 @@ def check_parents(env):
     return True, 'No CLAUDE.md or AGENTS.md sits above the scratch folder.'
 
 
-def check_demo():
-    """(ok, text) for whether the receipt builds on the made-up demo session."""
-    import tempfile
+def check_demo(env):
+    """(ok, text) for whether the chart library is intact and the receipt builds on the made-up demo session."""
+    if not pagelib.vendor_matches(env.repo / 'vendor'):
+        return False, ('The chart library file vendor/echarts.min.js does not match its checksum (git for Windows can '
+                       'change the line endings of a file, which does that). Say "update the tool" to repair it.')
     try:
         from tests.make_demo_session import write_demo_session
         with tempfile.TemporaryDirectory() as folder:
@@ -958,7 +1031,7 @@ def check_demo():
 def command_check(env, args, out):
     """kit check: one line per item, then Ready or Not ready."""
     results = [check_python(), check_sessions(env), check_git(env), check_scratch_folder(env), check_parents(env),
-               check_demo()]
+               check_demo(env)]
     for ok, text in results:
         print(('OK: ' if ok else 'FIX: ') + text, file=out)
     ready = all(ok for ok, _ in results)

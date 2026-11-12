@@ -1,0 +1,15 @@
+# Git must never change the line endings of a file that the code hashes or compares byte for byte.
+# Git for Windows converts line endings on checkout (core.autocrlf), which changes a file's bytes.
+
+# The chart library is checked against the SHA-256 in vendor/README.md on every build.
+vendor/** binary
+
+# The demo receipt is compared with a fresh build, and inlines the chart library.
+docs/demo-receipt.html binary
+
+# Invented session logs for the parser tests.
+tests/fixtures/** -text
+
+# What every run starts from and is told. A converted start file would change the tokens a run reads, and so its
+# cost, on one laptop and not another.
+experiments/tasks/** -text

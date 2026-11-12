@@ -48,7 +48,7 @@ python3 -m src.kit receipt [latest | <run folder name>] [--export]  # open a run
 python3 -m src.kit prompt [latest | <run folder name>]  # put a run's prompt back on the clipboard and print it
 python3 -m src.kit runs                                 # table of runs so far, merged from every results/<who>.csv
 python3 -m src.kit share                                # commit results/ only, pull --rebase, push; stops if anything else changed
-python3 -m src.kit update                               # git pull --ff-only, and stops if you changed anything
+python3 -m src.kit update                               # git pull --ff-only, and stops if you changed anything; repairs files whose line endings Windows changed
 ```
 
 Settings live in `local-settings.json` in the repo root (gitignored): `scratch_folder` (default `~/prompt-analyzer-scratch`) and `who`.
@@ -80,6 +80,7 @@ receipt shows the transcript total only and says so.
 | `experiments/tasks/<task>/` | One task: `task.md`, `start/` (made-up starting files), `prompt-original.md`, `prompt-lean.md`. `sample` is a practice task |
 | `.claude/` | Project skills (one per plain-English action) and `settings.json`, which allows only the kit commands and the four git commands that `share` uses |
 | `results/` | Committed. Experiment runs on made-up inputs: `<who>.csv`, `receipts/`, `outputs/<run>/`, `run-details/`. Never session logs |
+| `.gitattributes` | Keeps git from changing the line endings of files that are hashed or compared byte for byte: `vendor/`, `docs/demo-receipt.html`, `tests/fixtures/`, `experiments/tasks/` |
 | `docs/START-HERE.md` | One page for Anna and Reid: setup, every run, what to type |
 | `samples/`, `runs/`, `reports/` | Local only. Never committed |
 
