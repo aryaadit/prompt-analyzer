@@ -1,6 +1,7 @@
 """Tests for src/kit.py and the Windows-path handling. No test opens a window, a browser, or the clipboard,
 runs a command, or spends model usage. Every session here is an invented fixture."""
 import csv
+import html
 import io
 import json
 import os
@@ -268,19 +269,38 @@ class FinishTest(KitCase):
         self.assertEqual(code, 0, text)
         return folder, text
 
-    def test_it_finds_the_session_builds_the_receipt_and_prints_three_lines(self):
+    def test_it_finds_the_session_builds_the_receipt_and_prints_four_lines(self):
         folder, text = self.finish_clean_run()
         lines = text.splitlines()
-        self.assertEqual(len(lines), 3, text)
+        self.assertEqual(len(lines), 4, text)
         self.assertTrue(lines[0].startswith('Total: $'))
         self.assertIn('API-equivalent', lines[0])
-        self.assertTrue(lines[1].startswith('Most expensive step: step '))
-        self.assertIn('(estimated)', lines[1])
+        self.assertTrue(lines[1].startswith('Largest cause: '))
+        self.assertTrue(lines[2].startswith('Most expensive step: step '))
+        self.assertIn('(estimated)', lines[2])
         page = self.runs / 'sample-lean-1.receipt.html'
-        self.assertEqual(lines[2], 'Receipt: %s' % page)
+        self.assertEqual(lines[3], 'Receipt: %s' % page)
         self.assertTrue(page.is_file())
         self.assertNotIn(page.name, [p.name for p in folder.iterdir()])  # the receipt sits next to the run
         self.mocks['browser'].assert_called_once_with(page)
+
+    def test_the_largest_cause_line_uses_the_same_rule_as_the_receipt_headline(self):
+        """In this fixture the starting context (53 percent) is the largest cause, and it is not a step."""
+        _, text = self.finish_clean_run()
+        est = receipt.build(SESSION_3)
+        found = est['findings']['headline']
+        self.assertEqual(found['id'], 'starting_context')
+        line = next(l for l in text.splitlines() if l.startswith('Largest cause: '))
+        self.assertIn('the starting context', line)
+        self.assertIn('53% of the total (estimated)', line)
+        self.assertIn(found['cause'], line)
+        page = (self.runs / 'sample-lean-1.receipt.html').read_text(encoding='utf-8')
+        self.assertIn(html.escape(found['sentence'], quote=True), page)  # the page says the same thing
+        self.assertNotIn('starting context', next(l for l in text.splitlines() if l.startswith('Most expensive step')))
+
+    def test_with_no_headline_cause_the_line_says_so_in_words(self):
+        est = {'findings': {'headline': None}}
+        self.assertEqual(kit._largest_cause(est), 'none stands out')
 
     def test_it_writes_one_csv_row_with_exact_numbers(self):
         self.finish_clean_run()

@@ -1,6 +1,6 @@
 ---
 name: finish-run
-description: Finishes an experiment run: finds its Claude Code session, builds the receipt, records the result in the results file, flags anything odd, and prints the total, the most expensive step, and where the receipt is. Use when the user says a run is done.
+description: Finishes an experiment run: finds its Claude Code session, builds the receipt, records the result in the results file, flags anything odd, and prints the total, the largest cause, the most expensive step, and where the receipt is. Use when the user says a run is done.
 when_to_use: The user says things like "finish my run", "I am done with the run", "the run finished", or "record my run".
 allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m src.kit *)
 ---

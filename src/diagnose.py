@@ -231,7 +231,7 @@ def _headline(estimate, cards, session_findings):
     if not options:
         return None
     usd, cause, text = max(options, key=lambda option: option[0])
-    return {'id': cause, 'numbers': {'usd': usd, 'share': usd / total}, 'sentence': (
+    return {'id': cause, 'cause': text, 'numbers': {'usd': usd, 'share': usd / total}, 'sentence': (
         'The largest single cause: %s, %s of the total (est.).' % (text, percent(usd / total)))}
 
 

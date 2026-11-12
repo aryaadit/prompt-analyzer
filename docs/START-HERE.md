@@ -51,7 +51,7 @@ Do these in order. Do not skip any.
 
        finish my run
 
-10. It prints three lines: the total, the most expensive step, and where the receipt is. The receipt opens
+10. It prints four lines: the total, the largest cause, the most expensive step, and where the receipt is. The receipt opens
    in your browser. If it says "Check this run", the run was flagged. Do not start it again. Tell Anna.
 11. Open results.csv in the folder prompt-analyzer-runs (in your home folder). Copy the new last row into the
     shared results sheet.

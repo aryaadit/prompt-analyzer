@@ -471,6 +471,15 @@ def _most_expensive(est):
     return 'step %d, %s, %s (estimated)' % (best['number'], best['description'], fmt.money(best['total_usd']))
 
 
+def _largest_cause(est):
+    """Plain text for the largest cause: the same one the receipt's headline sentence names (the starting
+    context counts), not only the most expensive step."""
+    found = est['findings']['headline']
+    if not found:
+        return 'none stands out'
+    return '%s, %s of the total (estimated)' % (found['cause'], fmt.percent(found['numbers']['share']))
+
+
 def pick_unfinished(runs):
     """The most recently started run that is not finished, or a plain error."""
     open_runs = [d for d in read_all_details(runs) if not d.get('finished')]
@@ -480,7 +489,7 @@ def pick_unfinished(runs):
 
 
 def command_finish(env, args, out):
-    """kit finish: build the receipt, record the row, flag anything odd, print three lines."""
+    """kit finish: build the receipt, record the row, flag anything odd, print four lines."""
     runs = runs_folder(env)
     details = find_run(runs, args.run_name) if args.run_name else pick_unfinished(runs)
     session, est, page = _build_receipt(env, details)
@@ -496,6 +505,7 @@ def command_finish(env, args, out):
     if reasons:
         print('Check this run: %s.' % '; and '.join(reasons), file=out)
     print('Total: %s API-equivalent (exact tokens at public API prices)' % fmt.money(est['totals']['transcript_usd']), file=out)
+    print('Largest cause: %s' % _largest_cause(est), file=out)
     print('Most expensive step: %s' % _most_expensive(est), file=out)
     print('Receipt: %s' % page, file=out)
     return 0
