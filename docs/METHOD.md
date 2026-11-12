@@ -38,7 +38,10 @@ The log does not record tokens per file or per tool, so these are estimates. The
    of a conversation charges everything to the starting context and your first prompt.
 3. **Cache rebuilds.** If a call paid for more than twice the new tokens, and at least 5,000 more, the saved copy of the
    conversation had expired (usually after a pause). Only the new material is charged at the write price; the rest is charged
-   to the older items as carried cost. The step is flagged with the pause and the reason the log gives.
+   to the older items as carried cost. The step is flagged with the pause and the reason the log gives. The pause caused the
+   rebuild, not the step, so rebuild dollars are never part of a step's cost or of the top-three ranking. They are reported
+   as one finding instead: how many rebuilds, the pause before each, and the **extra** dollars. Extra is the write price minus
+   the re-sent price, on the tokens that had to be written again (est.).
 4. **A step's cost** is its output cost plus the new and carried cost of what its results added. A big result read early is paid
    for again on every later call, so it becomes expensive. That is the "carried cost" the page keeps pointing at.
 5. **Subagents** are separate conversations. Their exact total is added to the step that launched it ("subagent work"). The page
@@ -53,7 +56,12 @@ The log does not record tokens per file or per tool, so these are estimates. The
 
 - New material versus what the next call paid for at uncached or write prices: median ratio 1.001, and 99.2% of 42,768
   consecutive pairs within 20%. That is why growth is a good yardstick.
-- Cache rebuilds: 246 calls (0.6% of pairs) but 16.4% of all dollars. The median pause before them was 18 minutes.
+- Cache rebuilds: 256 calls (0.6% of consecutive pairs). Their **full cost is 16.8% of all dollars** ($1,023 of $6,073). That is
+  the whole cost of those calls, not the part that was avoidable. The **extra** over a normal re-send is $961, 15.8% of all dollars
+  (est.): re-writing a saved prompt costs the write price, where re-sending it would have cost the much lower re-sent price.
+  The extra is not all avoidable either: a pause that outlasts the saved copy forces a rebuild. An earlier count gave 246 calls and
+  16.4%; it skipped the calls where the model changed mid-session, which this count includes. The median pause before a rebuild was
+  18 minutes. Run `python3 -m src.audit receipts` to recompute all of this on your own logs.
 - Shell commands: 0.6% of 39,888 could not be classified.
 - All 84 sessions on one laptop: 82 build (the other 2 hold no model calls); largest sum-back difference $3.4e-13.
 

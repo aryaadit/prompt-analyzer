@@ -92,10 +92,13 @@ class PageStructureTest(RenderCase):
             self.assertIn(raw, text)  # present in the expanded detail
         self.assertIn('Re-sent', text)
 
-    def test_the_most_expensive_steps_come_first_in_the_top_cards(self):
+    def test_the_top_cards_are_ordered_and_steps_that_share_a_file_are_merged(self):
         est, text = self.pages['demo']
         self.assertEqual(text.count('class="card"'), 3)
-        self.assertLess(text.index('Step 2'), text.index('Step 7'))
+        self.assertLess(text.index('Steps 2, 7 and 14'), text.index('Steps 19, 21, 27, 29 and 33'))
+        self.assertLess(text.index('Steps 19, 21, 27, 29 and 33'), text.index('Step 22'))
+        self.assertIn('Read inventory.py 3 times', text)
+        self.assertIn('in total', text)
 
     def test_step_rows_and_details(self):
         est, text = self.pages['demo']
@@ -178,7 +181,7 @@ class CommandLineTest(unittest.TestCase):
             lines = printed.strip().splitlines()
             self.assertEqual(len(lines), 3)
             self.assertTrue(lines[0].startswith('Receipt: ') and lines[0].endswith('r.html'))
-            self.assertTrue(lines[1].startswith('Total: $') and 'API-equivalent' in lines[1])
+            self.assertTrue(lines[1].startswith('Total: ') and 'API-equivalent' in lines[1])
             self.assertTrue(lines[2].startswith('Most expensive step: #1'))
             self.assertTrue(os.path.getsize(html_path) > 5000)
             data = json.load(open(json_path))

@@ -158,6 +158,7 @@ def print_receipts(root):
     """Build every receipt in memory, writing nothing, and report how well that went."""
     built, failed, worst, bash, timing = 0, Counter(), 0.0, Counter(), []
     skipped = rebuilds = 0
+    extra = full = dollars = 0.0
     paths = parse.list_sessions(root)
     for path in paths:
         started = time.time()
@@ -173,6 +174,8 @@ def print_receipts(root):
         worst = max(worst, est['sum_back']['difference_usd'], est['sum_back']['kind_lines_difference_usd'])
         bash.update(est['bash']['by_kind'])
         skipped, rebuilds = skipped + est['skipped_pairs'], rebuilds + est['rebuilds']
+        extra, full = extra + est['rebuild_extra_usd'], full + est['rebuild_call_usd']
+        dollars += est['totals']['transcript_usd']
         timing.append((len(session['calls']), parsed - started, done - parsed, os.path.getsize(path)))
     total = sum(bash.values())
     print('RECEIPTS: every session built in memory, no files written')
@@ -180,7 +183,11 @@ def print_receipts(root):
     print('largest sum-back difference: $%.3e (tolerance $1e-06)' % worst)
     print('Bash calls %d; left as "other command": %d = %.2f%%' % (total, bash[estimate.bash.OTHER],
                                                                 100 * bash[estimate.bash.OTHER] / total if total else 0))
-    print('pairs skipped for negative growth: %d; calls flagged "cache rebuilt": %d' % (skipped, rebuilds))
+    print('pairs skipped for negative growth: %d' % skipped)
+    print('cache rebuilds: %d calls; full cost of those calls $%.2f = %s of all $%.2f (that is their whole cost, not the avoidable part)'
+          % (rebuilds, full, '%.1f%%' % (100 * full / dollars) if dollars else 'n/a', dollars))
+    print('extra over a normal re-send (est.): $%.2f = %s of all dollars (write price minus re-sent price on the re-written tokens)'
+          % (extra, '%.1f%%' % (100 * extra / dollars) if dollars else 'n/a'))
     if timing:
         calls, t_parse, t_est, size = max(timing)
         print('largest session: %d calls, %.1f MB; parse %.2fs + estimate %.2fs = %.2fs'

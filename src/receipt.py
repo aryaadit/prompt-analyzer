@@ -17,8 +17,8 @@ import tempfile
 import webbrowser
 from urllib.parse import urlsplit
 
-from . import estimate, parse, prices
-from .fmt import count, minutes, money, percent
+from . import estimate, fmt, parse, prices
+from .fmt import count, minutes, short_tokens
 from .summarize import REPO_ROOT
 
 # One colour per kind, the same in the bar, the cards, and the rows (Paul Tol's "muted" set, which
@@ -38,6 +38,22 @@ E = html.escape
 def esc(value):
     """HTML-escape any string that came from a log."""
     return E(str(value), quote=True)
+
+
+def money(value):
+    """Dollars for the page (two decimals, "<$0.01" under a cent), safe to put in HTML."""
+    return esc(fmt.money(value))
+
+
+def percent(share):
+    """A share for the page ("<0.1%" under a tenth of a percent), safe to put in HTML."""
+    return esc(fmt.percent(share))
+
+
+def money_column(values):
+    """A formatter that gives every row of one table column the same number of decimals."""
+    inner = fmt.money_column(values)
+    return lambda value: esc(inner(value))
 
 
 def tag(kind):
@@ -122,12 +138,43 @@ def _tiles(est):
              (count(totals['largest_prompt_tokens']), 'Largest prompt, in tokens', 'exact'),
              (percent(totals['carried_share']), 'Of the dollars went to re-sending earlier material', 'est.')]
     cells = ''.join('<div class="tile"><div class="num">%s</div><div class="lbl">%s %s</div></div>' % (
-        esc(value), esc(label), tag('exact' if word == 'exact' else 'est')) for value, label, word in tiles)
+        value, esc(label), tag('exact' if word == 'exact' else 'est')) for value, label, word in tiles)
     return '<section class="tiles">%s</section>' % cells
 
 
+def swatch(color, cls='sw', size=14):
+    """A colour square drawn as inline SVG, so it survives printing and PDF export."""
+    return ('<svg class="%s" width="%d" height="%d" viewBox="0 0 %d %d" aria-hidden="true">'
+            '<rect x="0.5" y="0.5" width="%d" height="%d" rx="3" fill="%s" stroke="#00000040"/></svg>'
+            % (cls, size, size, size, size, size - 1, size - 1, color))
+
+
+def chip(color):
+    """The small kind-colour square in front of a row."""
+    return swatch(color, 'chip', 12)
+
+
+def _headline(est):
+    """One sentence under the tiles: the single largest cause, taken from the findings."""
+    found = est['findings']['headline']
+    return '<p class="headline">%s</p>' % esc(found['sentence']) if found else ''
+
+
+def _total_row(est):
+    """The total of the lines above, with a check against the headline total at the top of the page."""
+    lines_sum = sum(row['usd'] for row in est['kinds'])
+    headline = est['totals']['transcript_usd']
+    if abs(lines_sum - headline) <= estimate.SUM_BACK_TOLERANCE:
+        check = '<span class="match">Matches the total at the top</span>'
+    else:
+        check = ('<span class="nomatch">Does not match: the lines add up to $%.6f, but the total at the top is $%.6f</span>'
+                 % (lines_sum, headline))
+    return ('<tr class="totalrow"><td></td><td>Total of the lines above</td><td class="r">%s</td><td class="r">100%%</td>'
+            '<td class="check">%s</td></tr>' % (money(lines_sum), check))
+
+
 def _where(est):
-    """The stacked bar by kind, with a legend that gives dollars and percent."""
+    """The stacked bar by kind, with a legend that gives dollars and percent, and a total row."""
     rows = [r for r in est['kinds'] if r['usd'] > 0]
     x, rects = 0.0, []
     for row in rows:
@@ -136,60 +183,122 @@ def _where(est):
             x, max(width, 0.0), KIND_COLORS[row['key']], esc(row['label']), money(row['usd']), percent(row['share'])))
         x += width
     legend = ''.join(
-        '<tr><td><span class="sw" style="background:%s"></span></td><td>%s</td><td class="r">%s</td>'
-        '<td class="r">%s</td><td>%s</td></tr>' % (
-            KIND_COLORS[r['key']], esc(r['label']), money(r['usd']), percent(r['share']),
+        '<tr><td>%s</td><td>%s</td><td class="r">%s</td><td class="r">%s</td><td>%s</td></tr>' % (
+            swatch(KIND_COLORS[r['key']]), esc(r['label']), money(r['usd']), percent(r['share']),
             tag('exact' if r['exact'] else 'est')) for r in rows)
-    return ('<section><h2>Where the money went</h2><p class="sub">Every dollar of the transcript total, by what it was spent on.</p>'
-            '<svg class="kindbar" viewBox="0 0 1000 46" role="img" aria-label="Dollars by kind">%s</svg>'
-            '<table class="legend kindlegend">%s</table></section>' % (''.join(rects), legend))
+    return ('<section class="keepsec"><h2>Where the money went</h2><p class="sub">Every dollar of the transcript total, by what it was spent on.</p>'
+            '<div class="keep"><svg class="kindbar" viewBox="0 0 1000 46" role="img" aria-label="Dollars by kind">%s</svg>'
+            '<table class="legend kindlegend">%s%s</table>'
+            '<p class="small">Each line is rounded, so the lines may not add up to the last cent. The total is the exact sum.</p>'
+            '</div></section>' % (''.join(rects), legend, _total_row(est)))
 
 
-def _cost_bar(step, scale):
-    """A bar split into output, new, carried, and subagent work; width is relative to the biggest step."""
-    parts = [('output', step['output_usd']), ('new', step['new_usd']), ('carried', step['carried_usd']),
-             ('subagent', step['subagent']['usd'] if step['subagent'] else 0.0)]
-    total = sum(v for _, v in parts)
-    width = (total / scale * 100) if scale else 0
-    segments = ''.join('<span style="flex:%.4f;background:%s"></span>' % (v / total * 1000, COST_COLORS[k])
-                       for k, v in parts if v > 0 and total > 0)
-    return '<div class="costbar"><div class="fill" style="width:%.2f%%">%s</div></div>' % (max(width, 0.4), segments)
+def _bar(parts, scale):
+    """A bar split into output, new, carried, and subagent work, drawn as SVG. Width is relative to `scale`."""
+    total = sum(parts.values())
+    fill = max(total / scale * 1000, 4.0) if scale else 4.0
+    rects, x = [], 0.0
+    for key in ('output', 'new', 'carried', 'subagent'):
+        width = parts[key] / total * fill if total > 0 else 0.0
+        if width > 0:
+            rects.append('<rect x="%.2f" y="0" width="%.2f" height="12" fill="%s"/>' % (x, width, COST_COLORS[key]))
+            x += width
+    return ('<svg class="costbar" viewBox="0 0 1000 12" preserveAspectRatio="none" role="img" aria-label="Cost split">'
+            '<rect width="1000" height="12" fill="#ECEAE4"/>%s</svg>' % ''.join(rects))
 
 
-def _split_text(step):
+def _parts(step):
+    """A step's own dollars as the four parts of a cost bar."""
+    return {'output': step['output_usd'], 'new': step['new_usd'], 'carried': step['carried_usd'],
+            'subagent': step['subagent']['usd'] if step['subagent'] else 0.0}
+
+
+def _split_text(parts):
     """The same split in words, each with its exact/est. word."""
-    bits = ['Output %s %s' % (money(step['output_usd']), tag('exact')),
-            'New %s %s' % (money(step['new_usd']), tag('est')),
-            'Carried %s %s' % (money(step['carried_usd']), tag('est'))]
-    if step['subagent']:
-        bits.append('Subagent work %s %s' % (money(step['subagent']['usd']), tag('exact')))
+    bits = ['Output %s %s' % (money(parts['output']), tag('exact')),
+            'New %s %s' % (money(parts['new']), tag('est')),
+            'Carried %s %s' % (money(parts['carried']), tag('est'))]
+    if parts['subagent']:
+        bits.append('Subagent work %s %s' % (money(parts['subagent']), tag('exact')))
     return ' &middot; '.join(bits)
 
 
+def _step_numbers(numbers):
+    """'Step 2' or 'Steps 2, 7 and 14'."""
+    names = [str(n) for n in numbers]
+    return 'Step ' + names[0] if len(names) == 1 else 'Steps ' + ', '.join(names[:-1]) + ' and ' + names[-1]
+
+
 def _cards(est):
-    """The three most expensive steps."""
-    by_number = {s['number']: s for s in est['steps']}
+    """The three biggest causes. Steps that share a target are merged into one card."""
     cards = []
     for top in est['findings']['top_steps']:
-        step = by_number[top['number']]
+        total = '<span class="cardcost">%s</span>%s' % (money(top['total_usd']), ' <span class="sub">in total</span>' if top['times'] > 1 else '')
         cards.append(
-            '<div class="card"><div class="cardhead"><span class="chip" style="background:%s"></span>'
-            '<b>Step %d</b><span class="cardcost">%s</span></div><div class="what">%s</div>%s'
+            '<div class="card"><div class="cardhead">%s<b>%s</b></div><div class="cardmoney">%s</div><div class="what">%s</div>%s'
             '<div class="split">%s</div><p class="why">%s</p></div>' % (
-                KIND_COLORS[step['kind']], step['number'], money(top['total_usd']), esc(top['description']),
-                _cost_bar(step, top['total_usd']), _split_text(step), esc(top['sentence'])))
+                chip(KIND_COLORS[top['kind']]), _step_numbers(top['steps']), total, esc(top['description']),
+                _bar(top['parts'], top['total_usd']), _split_text(top['parts']), esc(top['sentence'])))
     body = ''.join(cards) or '<p class="sub">No step has a public price, so none can be ranked.</p>'
     return ('<section><h2>The three most expensive steps</h2><p class="sub">A step\'s cost is its own output plus what '
-            'its results cost to send, now and on every later call.</p><div class="cards">%s</div>'
-            '<div class="legendline">%s</div></section>' % (body, _cost_legend()))
+            'its results cost to send, now and on every later call. Steps that touched the same file are merged into one card.</p>'
+            '<div class="cards">%s</div><div class="legendline">%s</div></section>' % (body, _cost_legend()))
 
 
 def _cost_legend():
-    """What the three colours of a cost bar mean."""
+    """What the colours of a cost bar mean."""
     labels = (('output', 'Output (the model\'s writing and thinking)'), ('new', 'New (first time sent)'),
               ('carried', 'Carried (re-sent on later calls)'), ('subagent', 'Subagent work'))
-    return ' '.join('<span class="key"><span class="sw" style="background:%s"></span>%s</span>' % (COST_COLORS[k], esc(v))
-                    for k, v in labels)
+    return ' '.join('<span class="key">%s%s</span>' % (swatch(COST_COLORS[k]), esc(v)) for k, v in labels)
+
+
+def _nice_ceiling(value):
+    """A round number at or above value (1, 2, 2.5, 5 or 10 times a power of ten)."""
+    magnitude = 10 ** (len(str(int(max(value, 1)))) - 1)
+    for factor in (1, 2, 2.5, 5, 10):
+        if factor * magnitude >= value:
+            return factor * magnitude
+    return 10 * magnitude
+
+
+def _x_ticks(n):
+    """Which call numbers get a label on the x axis: about eight, at round numbers, plus the last."""
+    step = next(s for s in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000) if n / s <= 8)
+    ticks = [1] + [k for k in range(step, n + 1, step) if k > 1]
+    return ticks if n - ticks[-1] >= step / 2 or n in ticks else ticks[:-1] + [n]
+
+
+GROWTH = {'left': 78, 'right': 990, 'top': 34, 'bottom': 310, 'width': 1000, 'height': 392}
+
+
+def _growth_axes(peak, n):
+    """Gridlines, y labels, x ticks, and axis titles for the growth chart."""
+    g, top = GROWTH, _nice_ceiling(peak)
+    span = g['bottom'] - g['top']
+    out = ['<text x="%d" y="18" font-size="15" fill="#333" font-weight="600">Tokens in the prompt</text>' % g['left']]
+    for i in range(5):
+        y = g['bottom'] - span * i / 4
+        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s"/>' % (
+            g['left'], y, g['right'], y, '#999' if i == 0 else '#E3E0D8'))
+        out.append('<text x="%d" y="%.1f" font-size="14" fill="#444" text-anchor="end">%s</text>' % (
+            g['left'] - 8, y + 5, short_tokens(top * i / 4)))
+    slot = (g['right'] - g['left']) / n
+    for k in _x_ticks(n):
+        x = g['left'] + slot * (k - 0.5)
+        out.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#999"/>' % (x, g['bottom'], x, g['bottom'] + 5))
+        out.append('<text x="%.1f" y="%d" font-size="14" fill="#444" text-anchor="middle">%d</text>' % (x, g['bottom'] + 24, k))
+    out.append('<text x="%d" y="%d" font-size="15" fill="#333" font-weight="600" text-anchor="middle">Model call, in order</text>' % (
+        (g['left'] + g['right']) // 2, g['bottom'] + 52))
+    return ''.join(out), top
+
+
+def _marker(kind):
+    """A drawn legend marker (inline SVG, so it prints)."""
+    shapes = {'resent': '<rect x="1" y="1" width="14" height="14" rx="2" fill="#0077BB"/>',
+              'new': '<rect x="1" y="1" width="14" height="14" rx="2" fill="#EE7733"/>',
+              'rebuild': '<polygon points="8,15 1,2 15,2" fill="#CC3311"/>',
+              'compacted': '<line x1="8" y1="0" x2="8" y2="16" stroke="#222" stroke-width="2" stroke-dasharray="4 3"/>'}
+    return '<svg class="mk" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">%s</svg>' % shapes[kind]
 
 
 def _growth(est):
@@ -197,39 +306,39 @@ def _growth(est):
     calls = est['calls']
     if not calls:
         return ''
+    g = GROWTH
     rebuilds = {s['order']: s['rebuild'] for s in est['steps'] if s['rebuild']}
-    peak = max(c['prompt_tokens'] for c in calls) or 1
-    width = 1000.0 / len(calls)
+    axes, top = _growth_axes(max(c['prompt_tokens'] for c in calls) or 1, len(calls))
+    span, slot = g['bottom'] - g['top'], (g['right'] - g['left']) / len(calls)
     bars, marks, last_segment = [], [], calls[0]['segment']
     for i, call in enumerate(calls):
-        x = i * width
-        h_resent, h_new = 190.0 * call['resent_tokens'] / peak, 190.0 * call['new_tokens'] / peak
-        bw = max(width - 0.4, 0.5)
+        x, bw = g['left'] + i * slot + slot * 0.07, max(slot * 0.86, 0.6)
+        h_resent, h_new = span * call['resent_tokens'] / top, span * call['new_tokens'] / top
         tip = 'Call %d: %s tokens in the prompt (%s re-sent, %s new)' % (
             i + 1, count(call['prompt_tokens']), count(call['resent_tokens']), count(call['new_tokens']))
         bars.append('<g><title>%s</title><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#0077BB"/>'
                     '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#EE7733"/></g>' % (
-                        tip, x, 205 - h_resent, bw, h_resent, x, 205 - h_resent - h_new, bw, h_new))
+                        tip, x, g['bottom'] - h_resent, bw, h_resent, x, g['bottom'] - h_resent - h_new, bw, h_new))
         if call['segment'] != last_segment:
-            marks.append('<line x1="%.2f" y1="8" x2="%.2f" y2="205" stroke="#222" stroke-dasharray="4 3"/>'
-                         '<text x="%.2f" y="14" font-size="11" fill="#222">compacted</text>' % (x, x, x + 3))
+            edge = g['left'] + i * slot
+            marks.append('<line x1="%.2f" y1="%d" x2="%.2f" y2="%d" stroke="#222" stroke-width="1.5" stroke-dasharray="5 4"/>'
+                         '<text x="%.2f" y="%d" font-size="13" fill="#222">compacted</text>' % (
+                             edge, g['top'] - 8, edge, g['bottom'], edge + 4, g['top'] + 6))
             last_segment = call['segment']
         if call['order'] in rebuilds:
-            info = rebuilds[call['order']]
-            cx, top = x + bw / 2, 205 - h_resent - h_new
+            cx, peak_y = x + bw / 2, g['bottom'] - h_resent - h_new
             marks.append('<polygon points="%.2f,%.2f %.2f,%.2f %.2f,%.2f" fill="#CC3311"><title>Cache rebuilt after %s</title>'
-                         '</polygon>' % (cx, top - 2, cx - 4, top - 10, cx + 4, top - 10, esc(minutes(info['pause_minutes']))))
-    return ('<section><h2>How the conversation grew</h2><p class="sub">One bar per model call in the main thread, in order. '
+                         '</polygon>' % (cx, peak_y - 3, cx - 7, peak_y - 17, cx + 7, peak_y - 17,
+                                          esc(minutes(rebuilds[call['order']]['pause_minutes']))))
+    return ('<section class="keepsec"><h2>How the conversation grew</h2><p class="sub">One bar per model call in the main thread, in order. '
             'Height is the size of the prompt that call sent. These numbers are %s.</p>'
-            '<svg class="growth" viewBox="0 0 1000 224" role="img" aria-label="Prompt size by call">%s'
-            '<text x="2" y="12" font-size="11" fill="#555">%s tokens</text><line x1="0" y1="205.5" x2="1000" y2="205.5" stroke="#999"/>'
-            '%s<text x="2" y="219" font-size="11" fill="#555">call 1</text>'
-            '<text x="998" y="219" font-size="11" fill="#555" text-anchor="end">call %d</text></svg>'
-            '<div class="legendline"><span class="key"><span class="sw" style="background:#0077BB"></span>Re-sent</span> '
-            '<span class="key"><span class="sw" style="background:#EE7733"></span>New</span> '
-            '<span class="key"><span class="sw tri"></span>Cache rebuilt (the saved copy had expired)</span> '
-            '<span class="key">Dashed line: compacted</span></div></section>' % (
-                tag('exact'), ''.join(bars), count(peak), ''.join(marks), len(calls)))
+            '<div class="keep"><svg class="growth" viewBox="0 0 %d %d" role="img" aria-label="Prompt size by call">%s%s%s</svg>'
+            '<div class="legendline"><span class="key">%sRe-sent (served from the saved copy)</span> '
+            '<span class="key">%sNew (written for the first time)</span> '
+            '<span class="key">%sCache rebuilt (the saved copy had expired)</span> '
+            '<span class="key">%sCompacted</span></div></div></section>' % (
+                tag('exact'), g['width'], g['height'], axes, ''.join(bars), ''.join(marks),
+                _marker('resent'), _marker('new'), _marker('rebuild'), _marker('compacted')))
 
 
 def _tool_lines(step, cwd):
@@ -258,7 +367,8 @@ def _flags(step):
     if step['rebuild']:
         info = step['rebuild']
         reason = ' (%s)' % info['miss_reason'] if info['miss_reason'] else ''
-        flags.append('Cache rebuilt after %s%s' % (minutes(info['pause_minutes']), reason))
+        flags.append('Cache rebuilt after %s%s: writing the conversation again cost %s (est.) more than re-sending it would have'
+                     % (minutes(info['pause_minutes']), reason, money(info['extra_usd'])))
     if step['growth_skipped']:
         flags.append('Result size could not be read from growth')
     if not step['priced']:
@@ -296,18 +406,19 @@ def _steps(est):
     ranked = sorted(steps, key=lambda s: -s['total_usd'])
     rank = {s['number']: i + 1 for i, s in enumerate(ranked)}
     scale = ranked[0]['total_usd'] if ranked else 0.0
+    column = money_column([s['total_usd'] for s in steps if s['priced']])
     rows = []
     for step in steps:
         flag_html = ''.join('<span class="flag">%s</span>' % esc(f.split(' after')[0] if f.startswith('Cache') else f)
                             for f in _flags(step))
-        total = money(step['total_usd']) if step['priced'] else 'no public price'
+        total = column(step['total_usd']) if step['priced'] else 'no public price'
         rows.append(
             '<tr class="step" tabindex="0" aria-expanded="false" data-order="%d" data-cost="%.9f" data-rank="%d" data-kind="%s">'
-            '<td class="r">%d</td><td><span class="chip" style="background:%s" title="%s"></span>%s %s</td>'
+            '<td class="r">%d</td><td>%s%s %s</td>'
             '<td>%s</td><td class="r">%s</td></tr>' % (
                 step['number'], step['total_usd'], rank[step['number']], step['kind'], step['number'],
-                KIND_COLORS[step['kind']], esc(estimate.KIND_LABELS[step['kind']]), esc(step['description']),
-                flag_html, _cost_bar(step, scale), total)
+                chip(KIND_COLORS[step['kind']]), esc(step['description']),
+                flag_html, _bar(_parts(step), scale), total)
             + '<tr class="detail" hidden>%s</tr>' % _detail(step, cwd))
     kinds = ''.join('<option value="%s">%s</option>' % (k, esc(l)) for k, l in estimate.KIND_LINES
                     if k in {s['kind'] for s in steps})
@@ -327,6 +438,7 @@ def _files(est):
     cwd, files = est['session']['cwd'], est['files']
     if not files:
         return '<section><h2>Files</h2><p class="sub">No file reads or edits were found.</p></section>'
+    column = money_column([r[k] for r in files for k in ('new_usd', 'carried_usd')])
     rows = []
     for i, row in enumerate(files):
         repeat = '<span class="flag">read %d times</span>' % (row['reads'] + row['bash_reads']) if row['read_more_than_once'] else ''
@@ -335,7 +447,7 @@ def _files(est):
                     '<td class="r">%d</td><td class="r">%s</td><td class="r">%s</td><td class="r">%s</td></tr>' % (
                         hidden, esc(os.path.basename(row['path'])), repeat, esc(display_path(row['path'], cwd)),
                         row['reads'], row['bash_reads'], row['writes'], count(row['tokens_in']),
-                        money(row['new_usd']), money(row['carried_usd'])))
+                        column(row['new_usd']), column(row['carried_usd'])))
     more = ('<button id="morefiles" type="button">Show all %d files</button>' % len(files)) if len(files) > TOP_FILES else ''
     return ('<section><h2>Files</h2><p class="sub">Files the agent read or changed, most expensive first. Tokens and costs are %s. '
             '"Shell reads" are files read inside Bash commands (cat, head, sed and so on).</p>'
@@ -431,29 +543,31 @@ def _fine_print(est):
 CSS = """
 :root{--bg:#fbfaf7;--ink:#1c1f24;--muted:#5b616b;--line:#dcd8cf;--card:#fff}
 *{box-sizing:border-box}
+html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 main{max-width:1040px;margin:0 auto;padding:28px 20px 80px}
 h1{font-size:2.2rem;margin:0}h2{font-size:1.4rem;margin:44px 0 4px}h3{font-size:1.05rem;margin:22px 0 4px}
 .sub{color:var(--muted);margin:2px 0 12px;font-size:.95rem}.lede{font-size:1.2rem;margin:10px 0 4px}
 .note{color:var(--muted);margin:0 0 6px}.warn{background:#fff4d6;border:1px solid #e0c36a;border-radius:8px;padding:8px 12px;margin:8px 0}
+.small{color:#6b7078;font-size:.82rem;margin:6px 0 0}
 .tag{font-size:.64rem;letter-spacing:.05em;text-transform:uppercase;padding:0 6px;border-radius:99px;border:1px solid currentColor;
 white-space:nowrap;vertical-align:middle;color:#3a3f47}.tag.est{border-style:dashed}
 .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:20px}
 .tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
 .num{font-size:2.5rem;font-weight:700;line-height:1.1}.lbl{color:var(--muted);font-size:.9rem;margin-top:4px}
+.headline{font-size:1.25rem;font-weight:600;margin:16px 0 0;padding:10px 14px;border-left:5px solid #1b2a49;background:#fff}
 .kindbar,.growth{width:100%;height:auto;display:block;background:var(--card);border:1px solid var(--line);border-radius:10px}
 .kindbar{border-radius:8px}.legend{border-collapse:collapse;margin-top:10px;width:100%}.legend td,.legend th{padding:3px 8px;text-align:left;font-size:.93rem}
-.kindlegend td:first-child{width:26px}.kindlegend td:nth-child(2){width:46%}
+.kindlegend td:first-child{width:26px}.kindlegend td:nth-child(2){width:36%}.kindlegend td:nth-child(5){width:34%}
+.kindlegend tr.totalrow td{border-top:2px solid #1c1f24;padding-top:7px;font-weight:700}
+.match{color:#1d5c2e;font-weight:600}.nomatch{color:#b3261e;font-weight:700}
 .r{text-align:right!important;font-variant-numeric:tabular-nums}
-.sw{display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid #0003;vertical-align:-2px;margin-right:6px}
-.sw.tri{background:#CC3311;clip-path:polygon(50% 100%,0 0,100% 0);border:0}
-.chip{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;border:1px solid #0003}
+.sw,.chip,.mk{display:inline-block;vertical-align:-2px;margin-right:6px}.mk{vertical-align:-3px}
 .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
-.cardhead{display:flex;align-items:center;gap:6px}.cardcost{margin-left:auto;font-size:1.5rem;font-weight:700}
+.cardhead{display:flex;align-items:center;gap:6px;min-height:24px}.cardmoney{margin-top:2px}.cardcost{font-size:1.7rem;font-weight:700}
 .what{font-size:1.05rem;margin:6px 0 8px}.split{font-size:.85rem;color:var(--muted);margin-top:8px}.why{margin:10px 0 0}
-.costbar{height:12px;background:#eceae4;border-radius:6px;overflow:hidden;min-width:60px}
-.fill{height:100%;display:flex;border-radius:6px;overflow:hidden}.fill span{display:block;min-width:1px}
+.costbar{width:100%;height:12px;display:block;min-width:60px;border-radius:6px}
 .legendline{margin-top:10px;font-size:.88rem;color:var(--muted)}.key{margin-right:14px;white-space:nowrap}
 .controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:8px}
 select,button{font:inherit;padding:4px 10px;border:1px solid #bdb8ad;border-radius:8px;background:#fff;cursor:pointer}
@@ -466,6 +580,17 @@ tr.step{cursor:pointer}tr.step:hover{background:#f3f1ea}tr.step:focus{outline:2p
 details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:"\\25B8 ";font-size:1.2rem}details[open]>summary::before{content:"\\25BE "}
 @media(max-width:800px){.tiles{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}.num{font-size:2rem}}
+@page{margin:14mm}
+@media print{
+*{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{background:#fff;font-size:12px}main{max-width:none;padding:0}
+.controls,#morefiles,#showall{display:none!important}
+.card,.tile,tr,.keep,.detailbox,.warn,.headline,svg,.legendline{break-inside:avoid;page-break-inside:avoid}
+h2,h3,.sub{break-after:avoid;page-break-after:avoid}.keepsec{break-inside:avoid;page-break-inside:avoid}
+thead{display:table-header-group}tr.step:hover{background:none}
+.tiles{margin-top:10px;grid-template-columns:repeat(4,1fr)}.num{font-size:1.6rem}.cards{grid-template-columns:repeat(3,1fr)}
+.card{padding:10px 12px}.cardcost{font-size:1.4rem}.what{font-size:.95rem}
+}
 """
 
 JS = """
@@ -504,9 +629,9 @@ def render(est):
     title = 'Receipt: %s, %s' % (est['session']['project'], when(est['session']['started']))
     return ('<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>'
-            '<style>%s</style><noscript><style>tr.detail{display:table-row!important}</style></noscript></head><body><main>%s%s%s%s%s%s%s%s%s'
+            '<style>%s</style><noscript><style>tr.detail{display:table-row!important}</style></noscript></head><body><main>%s%s%s%s%s%s%s%s%s%s'
             '</main><script>%s</script></body></html>\n' % (
-                esc(title), CSS, _top(est), _tiles(est), _where(est), _cards(est), _growth(est), _steps(est),
+                esc(title), CSS, _top(est), _tiles(est), _headline(est), _where(est), _cards(est), _growth(est), _steps(est),
                 _files(est), _findings(est), _fine_print(est), JS))
 
 
@@ -542,12 +667,13 @@ def build(session_path):
 
 
 def _report(est, path, out):
-    """The three plain lines: where the file is, the total, and the most expensive step."""
-    top = est['findings']['top_steps']
+    """The three plain lines: where the file is, the total, and the most expensive step (a single step)."""
+    priced = [s for s in est['steps'] if s['priced']]
+    best = max(priced, key=lambda s: s['total_usd']) if priced else None
     print('Receipt: %s' % path, file=out)
-    print('Total: %s (API-equivalent, exact tokens at public API prices)' % money(est['totals']['transcript_usd']), file=out)
-    print('Most expensive step: %s' % ('#%d, %s, %s' % (top[0]['number'], top[0]['description'], money(top[0]['total_usd']))
-                                       if top else 'none (no step has a public price)'), file=out)
+    print('Total: %s (API-equivalent, exact tokens at public API prices)' % fmt.money(est['totals']['transcript_usd']), file=out)
+    print('Most expensive step: %s' % ('#%d, %s, %s' % (best['number'], best['description'], fmt.money(best['total_usd']))
+                                       if best else 'none (no step has a public price)'), file=out)
 
 
 def main(argv=None, out=None):

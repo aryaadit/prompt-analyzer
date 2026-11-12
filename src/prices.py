@@ -150,6 +150,20 @@ def price_components(call):
     return parts
 
 
+def resend_rate(call):
+    """Dollars per token to re-send material that is already cached (the cache-read price), with the
+    call's own modifiers. None when the model has no public price."""
+    rates = rates_for(call['model'], prompt_size(call['tokens']), True)
+    if rates is None:
+        return None
+    multiplier = 1.0
+    if call.get('speed') == 'fast' and canonical_model(call['model']) in FAST_MODELS:
+        multiplier *= FAST_MULTIPLIER
+    if call.get('inference_geo') == 'us':
+        multiplier *= US_GEO_MULTIPLIER
+    return rates['cache_read'] * multiplier / 1_000_000
+
+
 def price_aggregate(model, tokens, cache_write='split'):
     """Dollars for summed tokens at base prices. Prompt-size tiers cannot be applied to totals."""
     return price_tokens(model, tokens, cache_write=cache_write, long_context=False)

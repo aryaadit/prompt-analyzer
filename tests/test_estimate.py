@@ -172,15 +172,44 @@ class FilesTableTest(DemoCase):
 
 
 class DiagnosisTest(DemoCase):
-    def test_three_steps_each_with_a_template_sentence(self):
+    def test_three_cards_with_three_different_causes(self):
         top = self.est['findings']['top_steps']
         self.assertEqual(len(top), 3)
         self.assertEqual([t['total_usd'] for t in top], sorted((t['total_usd'] for t in top), reverse=True))
         for item in top:
             self.assertIn(item['id'], ('subagent', 'rebuild', 'large_result', 'thinking', 'writing'))
             self.assertRegex(item['sentence'], r'exact|est\.')
-        self.assertEqual({t['id'] for t in top}, {'large_result'})
-        self.assertIn('later calls', top[0]['sentence'])
+        self.assertEqual([t['id'] for t in top], ['large_result', 'thinking', 'subagent'])
+        self.assertEqual(len({t['description'] for t in top}), 3)
+        targets = [{tuple(x) for s in self.steps.values() if s['number'] in t['steps'] for x in s['targets']} for t in top]
+        self.assertFalse(targets[0] & targets[1] or targets[0] & targets[2] or targets[1] & targets[2])
+
+    def test_steps_that_share_a_target_are_merged_into_one_card(self):
+        first = [s for s in self.est['findings']['top_steps']][0]
+        self.assertEqual((first['steps'], first['times'], first['description']), ([2, 7, 14], 3, 'Read inventory.py 3 times'))
+        self.assertAlmostEqual(first['total_usd'], sum(self.steps[n]['total_usd'] for n in (2, 7, 14)), places=12)
+        self.assertIn('These 3 results', first['sentence'])
+        self.assertAlmostEqual(first['parts']['new'] + first['parts']['carried'] + first['parts']['output'], first['total_usd'], places=12)
+        report = [t for t in self.est['findings']['top_steps'] if t['times'] == 5][0]
+        self.assertEqual(report['description'], 'Wrote or edited report.py 5 times')
+        self.assertTrue(report['sentence'].startswith('In all 5 steps, the model spent'))
+
+    def test_the_next_distinct_step_is_pulled_up_when_the_top_steps_share_a_target(self):
+        from src import diagnose
+        def step(number, total, target=None, **extra):
+            base = {'number': number, 'priced': True, 'total_usd': total, 'description': 'step %d' % number, 'kind': 'read_file',
+                    'targets': [['read', target]] if target else [], 'new_usd': total, 'carried_usd': 0.0, 'thinking_usd': 0.0,
+                    'output_usd': 0.0, 'material_tokens': 1000, 'resent_calls': 2, 'thinking_tokens': 0, 'tokens': {'output': 0},
+                    'subagent': None, 'rebuild': None}
+            return dict(base, **extra)
+        steps = [step(1, 10, '/f.py'), step(2, 9, '/f.py'), step(3, 8, '/f.py'), step(4, 7), step(5, 6), step(6, 5)]
+        cards = diagnose.top_steps(steps)
+        self.assertEqual([c['steps'] for c in cards], [[1, 2, 3], [4], [5]])  # step 6 stays out; steps 1 to 3 became one card
+        self.assertAlmostEqual(cards[0]['total_usd'], 27)
+        self.assertEqual(cards[0]['description'], 'Read f.py 3 times')
+        self.assertEqual([c['steps'] for c in diagnose.top_steps(steps[:2])], [[1, 2]])  # fewer than three causes: fewer cards
+        late = steps + [step(7, 0.5, '/f.py')]  # a low-ranked step on the same file still joins its card
+        self.assertEqual(diagnose.top_steps(late)[0]['steps'], [1, 2, 3, 7])
 
     def test_each_template_can_be_produced(self):
         base = {'new_usd': 0.0, 'carried_usd': 0.0, 'thinking_usd': 0.0, 'output_usd': 0.0, 'subagent': None, 'rebuild': None,
@@ -202,7 +231,7 @@ class DiagnosisTest(DemoCase):
 
     def test_session_findings_state_facts_and_give_no_advice(self):
         found = {f['id']: f for f in self.est['findings']['session']}
-        self.assertEqual(set(found), {'starting_context_share', 'resent_share', 'file_read_repeatedly'})
+        self.assertEqual(set(found), {'starting_context_share', 'resent_share', 'file_read_repeatedly', 'cache_rebuilds'})
         self.assertIn('inventory.py was read 3 times', found['file_read_repeatedly']['sentence'])
         for finding in found.values():
             self.assertTrue(finding['numbers'])

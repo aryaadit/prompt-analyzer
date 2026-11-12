@@ -187,9 +187,13 @@ def _rebuild_info(prev, call, dollars, new_tokens, new_total):
         return dollars['write'], dollars['read'], None
     write_rate = dollars['write'] / paid
     new_charge = min(new_total * write_rate, dollars['write'])
+    rewritten = dollars['write'] - new_charge
+    excess = max(paid - new_positive, 0)
+    extra = max(rewritten - excess * (prices.resend_rate(call) or 0.0), 0.0)  # write price minus re-sent price
     info = {'pause_minutes': minutes_between(prev['timestamp'], call['timestamp']),
             'miss_reason': call['cache_miss_reason'], 'tokens_written': paid,
-            'rewritten_usd': dollars['write'] - new_charge}
+            'rewritten_usd': rewritten, 'excess_tokens': excess, 'extra_usd': extra,
+            'call_usd': dollars['read'] + dollars['write'] + dollars['output']}
     return new_charge, dollars['read'] + dollars['write'] - new_charge, info
 
 
@@ -220,6 +224,9 @@ def allocate_chain(chain, stats):
             new_pool, carried_pool, rebuild = _rebuild_info(prev, call, dollars, new_tokens, new_total)
             steps[n]['rebuild'] = rebuild
             stats['rebuilds'] += rebuild is not None
+            if rebuild:
+                stats['events'].append(dict(rebuild, chain=chain['kind'], agent_id=chain['agent_id'],
+                                            order=call['order']))
             _spread(new_items, new_pool, 'new_usd')
             if old_tokens > 0:
                 cumulative[n] = cumulative[n - 1] + carried_pool / old_tokens
@@ -531,6 +538,7 @@ def build_estimate(session):
     if not session['calls']:
         raise ReceiptError('this log has no model calls')
     stats = defaultdict(int)
+    stats['events'] = []
     chains = _make_chains(session)
     all_items = {}
     for chain in chains:
@@ -548,6 +556,8 @@ def build_estimate(session):
         step['description'] = describe_step(step)
         step['kind'] = primary_kind(step)
         step['kind_split'] = step_kind_split(step)
+        step['targets'] = sorted({('read' if kind != 'write' else 'write', key)
+                                  for key, kind, _ in _file_events(step, session['cwd']) if key})
         step['total_usd'] = (step['output_usd'] + step['new_usd'] + step['carried_usd']
                              + (step['subagent']['usd'] if step['subagent'] else 0.0))
     facts = _session_facts(session, session['calls'])
@@ -570,6 +580,8 @@ def build_estimate(session):
                                         if c['usd'] is not None and not prices.is_validated(c['model'])}),
         'models_without_public_price': sorted({c['model'] for c in session['calls'] if c['usd'] is None}),
         'skipped_pairs': stats['skipped_pairs'], 'rebuilds': stats['rebuilds'],
+        'rebuild_events': stats['events'], 'rebuild_extra_usd': sum(e['extra_usd'] for e in stats['events']),
+        'rebuild_call_usd': sum(e['call_usd'] for e in stats['events']),
         'bash': _bash_stats(session['calls']), 'calls': [_call_row(c) for c in session['calls']
                                                          if c['source'] == 'main'],
     }
