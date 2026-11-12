@@ -1,6 +1,6 @@
 ---
 name: setup-check
-description: Checks that this laptop is ready to run the experiment: Python, Claude Code sessions, the latest version of the tool, the runs folder, and the demo receipt. Use when the user wants to know if their setup works.
+description: Checks that this laptop is ready to run the experiment: Python, Claude Code sessions, the latest version of the tool, the scratch folder, and the demo receipt. Use when the user wants to know if their setup works.
 when_to_use: The user says things like "check my setup", "am I ready", "is everything working", "is the tool set up", or something went wrong and they do not know why.
 allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m src.kit *)
 ---

@@ -37,7 +37,8 @@ Do these in order. Do not skip any.
 
        start run: sample, lean
 
-2. A new VS Code window opens on a fresh, empty copy of the task. The prompt is already on your clipboard.
+2. A new VS Code window opens on a fresh, empty copy of the task. It lives in a scratch folder
+   (prompt-analyzer-scratch, in your home folder), outside the project. The prompt is already on your clipboard.
    The prompt-analyzer window prints the next steps. They are the same as the steps below.
 3. In the new window, open Claude Code and start a NEW session (a fresh chat, not an old one).
 4. Type /model. Pick Sonnet 5.5, set Effort to High, leave Ultracode off. Same every run.
@@ -52,12 +53,23 @@ Do these in order. Do not skip any.
 
        finish my run
 
-11. It prints four lines: the total, the largest cause, the most expensive step, and where the receipt is. The receipt opens
-   in your browser. If it says "Check this run", the run was flagged (for example, it used a different model or effort from the first run of the task). Do not start it again. Tell Anna.
-12. Open results.csv in the folder prompt-analyzer-runs (in your home folder). Copy the new last row into the
-    shared results sheet.
+11. It prints the total, the largest cause, the most expensive step, and where the receipt is. The receipt opens
+   in your browser. It then says where everything went: the receipt, what the agent made, and your row in
+   your results file, all inside the project's results folder. If it says "Check this run", the run was
+   flagged (for example, it used a different model or effort from the first run of the task). Do not start it
+   again. Tell Anna. If it says it skipped a file for being over 5 MB, tell Anna too.
+12. Open your results file, results/<your first name in lower case>.csv, in the project. Copy the new last row
+    into the shared results sheet.
+13. Last step: in the prompt-analyzer window, type this exact sentence:
 
-Keep the run folder. The blind vote needs what the agent made.
+       share my results
+
+    It sends your results folder to the group (and nothing else). If it says files outside the results folder
+    are changed, nothing was sent: text Adit.
+
+Everything the blind vote needs is now in results/outputs/ (what the agent made), results/receipts/, and
+results/run-details/, all inside the project. The scratch folder is only a work area. Once you have shared,
+you can clear it; the tool never deletes it for you.
 
 ## What to type
 
@@ -68,10 +80,11 @@ Type these in the Claude Code chat panel of the prompt-analyzer window. Your own
 | check my setup | Checks that your laptop is ready, one line per item |
 | start a run | Makes a fresh run folder, copies the prompt, opens the folder in a new window |
 | start run: sample, lean | The same, with the task and version given |
-| finish my run | Finds the session, builds the receipt, saves the numbers |
+| finish my run | Finds the session, builds the receipt, copies what the agent made, saves the numbers in results/ |
 | show me the receipt | Opens the receipt of the last finished run |
 | show me the prompt again | Puts the prompt of your latest run back on the clipboard and prints it |
-| show the runs | Lists every run so far: task, version, run, who, dollars, flag |
+| show the runs | Lists every run so far, from everyone's results files: task, version, run, who, dollars, flag |
+| share my results | Sends your results folder to the group. It sends nothing else, and stops if anything else is changed |
 | update the tool | Gets the newest version of the tool. It stops if you changed anything yourself |
 
 All dollar amounts are API-equivalent: tokens times public API prices. Nobody is billed that amount.
@@ -84,7 +97,9 @@ All dollar amounts are API-equivalent: tokens times public API prices. Nobody is
 2. **The new window did not open, or the prompt is not on your clipboard.** The chat panel prints the folder
    path and, if needed, the whole prompt between two lines. In VS Code choose File, then Open Folder, and pick
    the folder. Copy the prompt from between the two lines.
-3. **"finish my run" cannot find the session.** Make sure you pasted the prompt in the NEW window and pressed
+3. **"share my results" says files outside the results folder are changed.** Nothing was sent and nothing was
+   changed. Text Adit; do not try to fix it yourself.
+4. **"finish my run" cannot find the session.** Make sure you pasted the prompt in the NEW window and pressed
    Enter. Do not start the run again. Type "check my setup", and if that is fine, text Adit.
 
 If none of those fix it: text Adit with a screenshot.
@@ -93,6 +108,7 @@ If none of those fix it: text Adit with a screenshot.
 
 - The same person runs both versions of a task.
 - Never reuse a run folder. Each run gets its own, and the tool will not let you reuse one.
+- Never put real data in results/. It is shared with the group on GitHub: made-up inputs only.
 - Never add to the prompt. Paste it exactly as it is.
 - Never change the model or effort between runs: Sonnet 5.5, Effort High, Ultracode off, every time.
 - Do not step away during a run. Start it when you have the time to see it through.

@@ -22,8 +22,8 @@ schedule, roles, and what is built.
 Week 1. Built and tested: the exact layer (parser, price table, plain-text summary) and the receipt
 page with its diagnosis, redesigned to the standard in [`docs/DESIGN.md`](docs/DESIGN.md) (three layers, Apache ECharts charts, one colour per meaning). Open [`docs/demo-receipt.html`](docs/demo-receipt.html) to see one (made-up data, safe for slides).
 [`docs/METHOD.md`](docs/METHOD.md) explains every number on it. Also built: the teammate kit (`src/kit.py`): a setup check, a run starter and finisher,
-seven plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
-Claude Code panel. Runs are saved outside the repo, in `prompt-analyzer-runs` in the home folder. Next: the experiment board, the lean prompt writer.
+eight plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
+Claude Code panel. Runs happen outside the repo, in `prompt-analyzer-scratch` in the home folder; their results (numbers, receipts, and what the agent made) are copied into `results/`, which is committed and shared with `share`. Next: the experiment board, the lean prompt writer.
 
 ## Run it
 
@@ -43,14 +43,18 @@ The teammate kit (teammates type sentences instead; see `docs/START-HERE.md`). U
 ```
 python3 -m src.kit check                                # is this laptop ready? one line per item
 python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]   # fresh run folder, prompt on the clipboard, new VS Code window
-python3 -m src.kit finish [<run folder name>]           # receipt, one results.csv row (with model and effort), a flag if the run needs a second look (including a different model or effort from the first run)
+python3 -m src.kit finish [<run folder name>]           # receipt, what the agent made, one row in results/<who>.csv (with model and effort), a flag if the run needs a second look
 python3 -m src.kit receipt [latest | <run folder name>] # open a run's receipt
 python3 -m src.kit prompt [latest | <run folder name>]  # put a run's prompt back on the clipboard and print it
-python3 -m src.kit runs                                 # table of runs so far
+python3 -m src.kit runs                                 # table of runs so far, merged from every results/<who>.csv
+python3 -m src.kit share                                # commit results/ only, pull --rebase, push; stops if anything else changed
 python3 -m src.kit update                               # git pull --ff-only, and stops if you changed anything
+python3 -m src.kit migrate [<old runs folder>]          # one time: copy runs from the old prompt-analyzer-runs folder into results/
 ```
 
-Settings live in `local-settings.json` in the repo root (gitignored): `runs_folder` (default `~/prompt-analyzer-runs`) and `who`.
+Settings live in `local-settings.json` in the repo root (gitignored): `scratch_folder` (default `~/prompt-analyzer-scratch`) and `who`.
+
+`results/` is committed: `<who>.csv`, `receipts/<run>.receipt.html`, `outputs/<run>/` (files the run created or changed, nothing over 5 MB), and `run-details/<run>.json`. Made-up task inputs only, never session logs.
 
 `--session` takes a path, a session id, `latest`, or a folder (the latest session that ran in it). Add `--no-open`
 to skip the browser, `--out <path>` to choose the file, and `--json` to also write the numbers. Files go to `reports/`,
@@ -75,7 +79,8 @@ receipt shows the transcript total only and says so.
 | `tests/` | Unit tests, with synthetic fixtures under `tests/fixtures/` |
 | `skill/` | The packaged skill (later) |
 | `experiments/tasks/<task>/` | One task: `task.md`, `start/` (made-up starting files), `prompt-original.md`, `prompt-lean.md`. `sample` is a practice task |
-| `.claude/` | Project skills (one per plain-English action) and `settings.json`, which allows only the kit commands |
+| `.claude/` | Project skills (one per plain-English action) and `settings.json`, which allows only the kit commands and the four git commands that `share` uses |
+| `results/` | Committed. Experiment runs on made-up inputs: `<who>.csv`, `receipts/`, `outputs/<run>/`, `run-details/`. Never session logs |
 | `docs/START-HERE.md` | One page for Anna and Reid: setup, every run, what to type |
 | `samples/`, `runs/`, `reports/` | Local only. Never committed |
 

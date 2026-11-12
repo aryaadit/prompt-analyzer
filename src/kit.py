@@ -1,4 +1,4 @@
-"""The teammate kit: setup check, run starter, run finisher, receipts, and the run list.
+"""The teammate kit: setup check, run starter, run finisher, receipts, the run list, and sharing.
 
     python3 -m src.kit check
     python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]
@@ -6,16 +6,24 @@
     python3 -m src.kit receipt [latest | <run folder name>]
     python3 -m src.kit prompt [latest | <run folder name>]
     python3 -m src.kit runs
+    python3 -m src.kit share
     python3 -m src.kit update
+    python3 -m src.kit migrate [<old runs folder>]
 
 Everything printed is plain words. A problem says what happened and what to do next, in a
-sentence or two, never a stack trace. Runs live outside the repo (default: prompt-analyzer-runs
-in the home folder) because Claude Code reads instruction files from parent folders, and a run
-inside this repo would carry this project's rules and change its cost. Works on Mac and Windows:
-paths are pathlib, and nothing assumes the Python command is called python3.
+sentence or two, never a stack trace.
+
+Where things live. A run happens in a scratch folder OUTSIDE the repo (default:
+prompt-analyzer-scratch in the home folder), because Claude Code reads instruction files from
+parent folders, and a run inside this repo would carry this project's rules and change its cost.
+Everything else lives in results/ in the repo, which is committed: results/<who>.csv (one file
+per person), results/receipts/, results/outputs/<run>/ (what the agent made), and
+results/run-details/<run>.json. results/ holds made-up task inputs only, never session logs.
+Works on Mac and Windows: paths are pathlib, and nothing assumes the Python command is called python3.
 """
 import argparse
 import csv
+import filecmp
 import json
 import os
 import re
@@ -30,15 +38,20 @@ from pathlib import Path
 from . import estimate, fmt, parse, paths, receipt, summarize
 
 REPO = Path(__file__).resolve().parent.parent
-SETTINGS_NAME = 'local-settings.json'  # gitignored; holds runs_folder and who
-DEFAULT_RUNS_NAME = 'prompt-analyzer-runs'
+SETTINGS_NAME = 'local-settings.json'  # gitignored; holds scratch_folder and who
+DEFAULT_SCRATCH_NAME = 'prompt-analyzer-scratch'
+LEGACY_RUNS_NAME = 'prompt-analyzer-runs'  # the old name of the scratch folder; only `migrate` reads it
+RESULTS_DIR = 'results'  # inside the repo, committed
+RECEIPTS_DIR, OUTPUTS_DIR = 'receipts', 'outputs'
+MAX_OUTPUT_BYTES = 5 * 1024 * 1024  # a file the agent made that is bigger than this is not copied
+SKIP_OUTPUT_DIRS = ('.git', '.claude', 'node_modules', '__pycache__')  # tooling, not something the agent made
 MIN_PYTHON = (3, 9)
 VERSIONS = ('original', 'lean')
 DETAILS_DIR = 'run-details'
 LONG_AGO = datetime(1970, 1, 1, tzinfo=timezone.utc)
-RESULTS_NAME = 'results.csv'
 JUNK_FILES = ('.DS_Store', '.gitkeep', 'Thumbs.db')
 _SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+_WHO = re.compile(r'^[A-Za-z]+$')
 _RUN_NAME = re.compile(r'^(?P<task>[a-z0-9][a-z0-9-]*)-(?P<version>original|lean)-(?P<run>\d+)$')
 GO_BACK = 'Go back to the prompt-analyzer window to do this, so the run stays clean.'
 CSV_COLUMNS = (
@@ -62,6 +75,7 @@ class Env:
         self.settings_path = Path(settings_path) if settings_path else self.repo / SETTINGS_NAME
         self.projects_root = self.home / '.claude' / 'projects'
         self.tasks_root = self.repo / 'experiments' / 'tasks'
+        self.results = self.repo / RESULTS_DIR
 
 
 def load_settings(env):
@@ -81,14 +95,22 @@ def save_settings(env, settings):
     env.settings_path.write_text(json.dumps(settings, indent=2) + '\n', encoding='utf-8')
 
 
-def runs_folder(env):
-    """The folder that holds every run: from the settings file, else prompt-analyzer-runs in the home folder."""
-    chosen = load_settings(env).get('runs_folder')
-    folder = Path(chosen).expanduser() if chosen else env.home / DEFAULT_RUNS_NAME
+def scratch_folder(env):
+    """The working folder where runs happen, outside the repo: from the settings file, else
+    prompt-analyzer-scratch in the home folder."""
+    settings = load_settings(env)
+    chosen = settings.get('scratch_folder') or settings.get('runs_folder')  # runs_folder: the old setting name
+    folder = Path(chosen).expanduser() if chosen else env.home / DEFAULT_SCRATCH_NAME
     if not folder.is_absolute():
-        raise KitError('The runs folder in %s must be a full path, such as one starting with / or C:\\. Tell Adit.'
+        raise KitError('The scratch folder in %s must be a full path, such as one starting with / or C:\\. Tell Adit.'
                        % env.settings_path.name)
     return folder
+
+
+def results_csv(env, who):
+    """The results file of one person: results/<first name in lower case>.csv (lower case so that Adit and adit
+    cannot become two files on a Mac or Windows machine)."""
+    return env.results / (who.lower() + '.csv')
 
 
 def now_text():
@@ -226,42 +248,81 @@ def run_name(task, version, number):
     return '%s-%s-%d' % (task, version, number)
 
 
-def read_all_details(runs):
-    """Every run's details record, oldest start first. Damaged files are skipped."""
+def _read_details_in(base):
+    """The details records saved under base/run-details, in no particular order. Damaged files are skipped."""
+    folder = base / DETAILS_DIR
     found = []
-    for path in sorted((runs / DETAILS_DIR).glob('*.json')) if (runs / DETAILS_DIR).is_dir() else []:
+    for path in sorted(folder.glob('*.json')) if folder.is_dir() else []:
         try:
             data = json.loads(path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             continue
-        if isinstance(data, dict) and data.get('name'):
+        if isinstance(data, dict) and _RUN_NAME.match(str(data.get('name'))):  # the name becomes a file name
             found.append(data)
-    found.sort(key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
     return found
 
 
-def write_details(runs, details):
-    """Save one run's details record (outside the run folder)."""
-    folder = runs / DETAILS_DIR
+def read_all_details(env):
+    """Every run's details record, oldest start first: runs in progress (scratch folder) and finished runs of
+    everyone (results/run-details). When a run is in both places, the finished record in results/ wins."""
+    found = {d['name']: d for d in _read_details_in(scratch_folder(env))}
+    found.update({d['name']: d for d in _read_details_in(env.results)})
+    return sorted(found.values(), key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
+
+
+def my_details(env):
+    """read_all_details, but only the runs of the person using this laptop (when their name is known)."""
+    who = (load_settings(env).get('who') or '').strip().lower()
+    return [d for d in read_all_details(env) if not who or str(d.get('who', '')).lower() == who]
+
+
+def write_details(base, details):
+    """Save one run's details record under base/run-details."""
+    folder = base / DETAILS_DIR
     folder.mkdir(parents=True, exist_ok=True)
     _atomic_write(folder / (details['name'] + '.json'), json.dumps(details, indent=2) + '\n')
 
 
-def next_run_number(runs, task, version):
-    """The next free run number for a task and version (folders and details files both count)."""
+def public_details(details):
+    """The details record that goes into results/: without the path of the scratch folder on this laptop."""
+    return {key: value for key, value in details.items() if key != 'folder'}
+
+
+def read_all_rows(env):
+    """Every row of every person's results file in results/, oldest date first. Damaged files are skipped."""
+    rows = []
+    for path in sorted(env.results.glob('*.csv')) if env.results.is_dir() else []:
+        try:
+            with open(str(path), newline='', encoding='utf-8') as handle:
+                rows += [r for r in csv.DictReader(handle) if r.get('task') and r.get('version')]
+        except (OSError, ValueError):
+            continue
+    rows.sort(key=lambda r: (r.get('date') or '', r['task'], r['version'], int(r['run']) if str(r.get('run')).isdigit() else 0))
+    return rows
+
+
+def used_names(env):
+    """Every run name already taken: a folder or details file in the scratch folder, or a run in results/."""
+    scratch = scratch_folder(env)
+    names = {p.name for p in scratch.iterdir()} if scratch.is_dir() else set()
+    names |= {d['name'] for d in read_all_details(env)}
+    names |= {'%s-%s-%s' % (r['task'], r['version'], r['run']) for r in read_all_rows(env)}
+    return names
+
+
+def next_run_number(env, task, version):
+    """The next free run number for a task and version (folders, details files, and results all count)."""
     used = set()
-    names = [p.name for p in runs.iterdir()] if runs.is_dir() else []
-    names += [d['name'] for d in read_all_details(runs)]
-    for name in names:
+    for name in used_names(env):
         match = _RUN_NAME.match(name)
         if match and match.group('task') == task and match.group('version') == version:
             used.add(int(match.group('run')))
     return max(used, default=0) + 1
 
 
-def find_run(runs, name):
+def find_run(env, name):
     """The details record for a run folder name, or a plain error."""
-    for details in read_all_details(runs):
+    for details in read_all_details(env):
         if details['name'] == name:
             return details
     raise KitError('I do not know a run called "%s". Say "show the runs" to see the ones there are.' % name)
@@ -278,21 +339,23 @@ def start_run(env, task, version, run=None, who=None):
     who = (who or settings.get('who') or '').strip()
     if not who:
         raise KitError('I need your first name for the record. Add --who and your first name, for example: --who Anna.')
-    runs = runs_folder(env)
-    number = run if run is not None else next_run_number(runs, task, version)
+    if not _WHO.match(who):
+        raise KitError('Your first name must be letters only, with no spaces, for example: --who Anna.')
+    scratch = scratch_folder(env)
+    number = run if run is not None else next_run_number(env, task, version)
     if number < 1:
         raise KitError('The run number must be 1 or higher.')
     name = run_name(task, version, number)
-    if (runs / name).exists() or (runs / DETAILS_DIR / (name + '.json')).exists():
-        raise KitError('The run folder %s already exists, so I did not touch it. Never reuse a run folder: it still '
+    if name in used_names(env):
+        raise KitError('The run %s already exists, so I did not touch it. Never reuse a run folder: it still '
                        'holds the earlier run. Start again without --run to use the next free number, which is %d.'
-                       % (name, next_run_number(runs, task, version)))
+                       % (name, next_run_number(env, task, version)))
     prompt = (task_dir / ('prompt-%s.md' % version)).read_text(encoding='utf-8').rstrip('\r\n')
-    _copy_start_files(task_dir / 'start', runs / name)
+    _copy_start_files(task_dir / 'start', scratch / name)
     details = {'name': name, 'task': task, 'version': version, 'run': number, 'who': who,
                'started': now_text(), 'finished': None, 'practice': is_practice(task_dir),
-               'folder': str(runs / name), 'prompt': prompt}
-    write_details(runs, details)
+               'folder': str(scratch / name), 'prompt': prompt}
+    write_details(scratch, details)
     if settings.get('who') != who:
         save_settings(env, dict(settings, who=who))
     return details, prompt, task_dir
@@ -342,7 +405,8 @@ def next_steps(details, task_dir, clipboard_ok, vscode_ok, prompt):
             '   ' + line for line in answers]
     else:
         lines.append('7. If it asks a question, answer from task.md (experiments/tasks/%s/task.md).' % details['task'])
-    lines += ['8. When it finishes, come back to the prompt-analyzer window and say: finish my run']
+    lines += ['8. When it finishes, come back to the prompt-analyzer window and say: finish my run',
+              '9. Then say: share my results']
     return '\n'.join(lines)
 
 
@@ -387,9 +451,9 @@ def effort_names(session):
     return '; '.join(name for name, _ in counts.most_common())
 
 
-def reference_run(runs, details):
+def reference_run(env, details):
     """The details of the first finished run of the same task, or None when this run is the first one."""
-    same_task = [d for d in read_all_details(runs) if d['task'] == details['task'] and d['name'] != details['name']
+    same_task = [d for d in read_all_details(env) if d['task'] == details['task'] and d['name'] != details['name']
                  and d.get('model')]
     if not same_task:
         return None
@@ -452,9 +516,11 @@ def build_result(details, session, est, reasons):
         'session_id': facts['session_id']}
 
 
-def upsert_result(runs, row):
-    """Add the row to results.csv, replacing an earlier row for the same task, version, and run."""
-    path = runs / RESULTS_NAME
+def upsert_result(env, row):
+    """Add the row to the person's results file (results/<who>.csv), replacing an earlier row for the same task,
+    version, and run."""
+    path = results_csv(env, row['who'])
+    path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     if path.is_file():
         with open(str(path), newline='', encoding='utf-8') as handle:
@@ -469,22 +535,70 @@ def upsert_result(runs, row):
     os.replace(str(temp), str(path))
 
 
+def receipt_path(env, name):
+    """Where a run's receipt page is kept: results/receipts/<run>.receipt.html."""
+    return env.results / RECEIPTS_DIR / (name + '.receipt.html')
+
+
 def _build_receipt(env, details):
-    """Find the run's session, build its receipt page, and write it next to the run. Returns the pieces."""
-    runs = runs_folder(env)
-    folder = runs / details['name']
+    """Find the run's session, build its receipt page, and write it into results/receipts. Returns the pieces."""
+    folder = scratch_folder(env) / details['name']
     if not folder.is_dir():
-        raise KitError('The run folder %s is missing, so I cannot find its session. Tell Adit; do not start it again.'
-                       % details['name'])
+        raise KitError('The run folder %s is missing from the scratch folder, so I cannot find its session. Tell Adit; '
+                       'do not start it again.' % details['name'])
     session_path = find_session(env, folder)
     try:
         session = parse.parse_session(session_path)
         est = estimate.build_estimate(session)
     except estimate.ReceiptError as error:
         raise KitError('I could not build the receipt: %s. Tell Adit.' % error)
-    page = runs / (details['name'] + '.receipt.html')
+    page = receipt_path(env, details['name'])
+    page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(receipt.render(est), encoding='utf-8')
     return session, est, page
+
+
+def find_outputs(start_dir, run_dir):
+    """What the agent made in a run folder. Returns (paths to copy, notes about files left out). A path is
+    relative to the run folder. Files that are unchanged from the task's start files are not outputs. Tooling
+    folders, junk files, links, and files over 5 MB are left out (the big ones are named in the notes)."""
+    copy, notes = [], []
+    for here, folders, files in os.walk(str(run_dir)):  # os.walk does not follow links to folders
+        folders[:] = sorted(f for f in folders if f not in SKIP_OUTPUT_DIRS and not os.path.islink(os.path.join(here, f)))
+        for name in sorted(files):
+            path = Path(here) / name
+            relative = path.relative_to(run_dir)
+            if name in JUNK_FILES or path.is_symlink():
+                continue
+            original = start_dir / relative
+            if original.is_file() and filecmp.cmp(str(original), str(path), shallow=False):
+                continue
+            size = path.stat().st_size
+            if size > MAX_OUTPUT_BYTES:
+                notes.append('Skipped %s: it is %.1f MB, over the 5 MB limit.' % (relative.as_posix(), size / 1048576))
+                continue
+            copy.append(relative)
+    return copy, notes
+
+
+def copy_outputs(env, details, run_dir, task_dir=None):
+    """Copy what the run made into results/outputs/<run>/. Returns (number of files copied, notes)."""
+    try:
+        task_dir = task_dir or task_folder(env, details['task'])
+        start_dir = task_dir / 'start'
+    except KitError:
+        start_dir = Path(os.devnull)  # the task is gone, so every file counts as made by the run
+    copy, notes = find_outputs(start_dir, run_dir)
+    target = env.results / OUTPUTS_DIR / details['name']
+    done = 0
+    for relative in copy:
+        try:
+            (target / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(run_dir / relative), str(target / relative))
+            done += 1
+        except OSError:
+            notes.append('Could not copy %s.' % relative.as_posix())
+    return done, notes
 
 
 def _most_expensive(est):
@@ -505,27 +619,50 @@ def _largest_cause(est):
     return '%s, %s of the total (estimated)' % (found['cause'], fmt.percent(found['numbers']['share']))
 
 
-def pick_unfinished(runs):
-    """The most recently started run that is not finished, or a plain error."""
-    open_runs = [d for d in read_all_details(runs) if not d.get('finished')]
+def pick_unfinished(env):
+    """The most recently started run of this laptop that is not finished, or a plain error."""
+    done = {(d['name'], str(d.get('who', '')).lower()) for d in _read_details_in(env.results)}
+    open_runs = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished')
+                 and (d['name'], str(d.get('who', '')).lower()) not in done]
+    open_runs.sort(key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
     if not open_runs:
         raise KitError('There is no unfinished run. Say "show the runs" to see them, or "start a run" to begin one.')
     return open_runs[-1]
 
 
+def own_run(env, name):
+    """The details of a run started on this laptop (the scratch record), else any run of that name."""
+    for details in _read_details_in(scratch_folder(env)):
+        if details['name'] == name:
+            return details
+    return find_run(env, name)
+
+
+def check_name_is_free(env, details):
+    """A run name in results/ that belongs to someone else must never be overwritten."""
+    found = [d for d in _read_details_in(env.results) if d['name'] == details['name']]
+    if found and str(found[0].get('who', '')).lower() != str(details['who']).lower():
+        raise KitError('The run %s is already in the shared results and belongs to %s, so I stopped and changed '
+                       'nothing. Say "update the tool" to get their results, then start a new run so it gets a '
+                       'free number. Tell Adit.' % (details['name'], found[0].get('who')))
+
+
 def command_finish(env, args, out):
-    """kit finish: build the receipt, record the row, flag anything odd, print four lines."""
-    runs = runs_folder(env)
-    details = find_run(runs, args.run_name) if args.run_name else pick_unfinished(runs)
+    """kit finish: build the receipt, copy what the run made, record the row, flag anything odd, print the result."""
+    scratch = scratch_folder(env)
+    details = own_run(env, args.run_name) if args.run_name else pick_unfinished(env)
+    check_name_is_free(env, details)
     session, est, page = _build_receipt(env, details)
-    reasons = session_flags(session, est, reference_run(runs, details))
+    reasons = session_flags(session, est, reference_run(env, details))
     row = build_result(details, session, est, reasons)
-    upsert_result(runs, row)
+    copied, notes = copy_outputs(env, details, scratch / details['name'])
+    upsert_result(env, row)
     details.update({'finished': now_text(), 'model': model_names(est), 'effort': effort_names(session),
                     'session_id': est['session']['session_id'],
                     'total_usd': est['totals']['transcript_usd'], 'check_this': bool(reasons),
                     'check_reasons': reasons})
-    write_details(runs, details)
+    write_details(env.results, public_details(details))
+    write_details(scratch, details)
     if not args.no_open and not open_in_browser(page):
         print('I could not open the receipt in a browser. Open this file yourself.', file=out)
     if reasons:
@@ -534,6 +671,14 @@ def command_finish(env, args, out):
     print('Largest cause: %s' % _largest_cause(est), file=out)
     print('Most expensive step: %s' % _most_expensive(est), file=out)
     print('Receipt: %s' % page, file=out)
+    print(('Outputs: %d file%s copied to %s' % (copied, '' if copied == 1 else 's', env.results / OUTPUTS_DIR / details['name']))
+          if copied else 'Outputs: the run made no new files, so nothing was copied.', file=out)
+    for note in notes:
+        print(note, file=out)
+    print('Results: row saved in %s' % results_csv(env, details['who']), file=out)
+    print('Everything from this run is now in %s, so the scratch folder %s can be cleared. I deleted nothing.'
+          % (env.results, scratch), file=out)
+    print('Last step: say "share my results" to send this to the group.', file=out)
     return 0
 
 
@@ -541,15 +686,14 @@ def command_finish(env, args, out):
 
 def command_receipt(env, args, out):
     """kit receipt: open the receipt for a run, building it if needed."""
-    runs = runs_folder(env)
     if args.run_name in (None, 'latest'):
-        done = [d for d in read_all_details(runs) if d.get('finished')]
+        done = [d for d in my_details(env) if d.get('finished')]
         if not done:
             raise KitError('There is no finished run yet. When a run is done, say "finish my run".')
         details = max(done, key=lambda d: estimate.parse_time(d['finished']) or LONG_AGO)
     else:
-        details = find_run(runs, args.run_name)
-    page = runs / (details['name'] + '.receipt.html')
+        details = find_run(env, args.run_name)
+    page = receipt_path(env, details['name'])
     if not page.is_file():
         _, _, page = _build_receipt(env, details)
     if not args.no_open and not open_in_browser(page):
@@ -575,14 +719,13 @@ def prompt_for_run(env, details):
 
 def command_prompt(env, args, out):
     """kit prompt: put a run's prompt back on the clipboard and print it. Default: the run started last."""
-    runs = runs_folder(env)
     if args.run_name in (None, 'latest'):
-        everything = read_all_details(runs)
+        everything = my_details(env)
         if not everything:
             raise KitError('No runs yet. To begin one, say "start a run".')
         details = everything[-1]
     else:
-        details = find_run(runs, args.run_name)
+        details = find_run(env, args.run_name)
     prompt, note = prompt_for_run(env, details)
     clipboard_ok = copy_to_clipboard(prompt)
     print('Prompt for %s (%s, %s version):' % (details['name'], details['task'], details['version']), file=out)
@@ -602,23 +745,37 @@ def _table(rows):
     return '\n'.join('  '.join(str(cell).ljust(widths[i]) for i, cell in enumerate(row)).rstrip() for row in rows)
 
 
+def _dollars(text):
+    """A dollar figure from a results cell, or a dash when the cell is empty or damaged."""
+    try:
+        return fmt.money(float(text))
+    except (TypeError, ValueError):
+        return '-'
+
+
 def command_runs(env, args, out):
-    """kit runs: list the runs so far."""
-    details = read_all_details(runs_folder(env))
-    if not details:
+    """kit runs: list the runs so far. Finished runs of everyone come from every results/<who>.csv; runs
+    started on this laptop and not finished come from the scratch folder."""
+    rows = read_all_rows(env)
+    finished = {('%s-%s-%s' % (r['task'], r['version'], r['run']), r.get('who', '').lower()) for r in rows}
+    waiting = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished')
+               and (d['name'], str(d.get('who', '')).lower()) not in finished]
+    waiting.sort(key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
+    if not rows and not waiting:
         print('No runs yet. To begin one, say "start a run".', file=out)
         return 0
-    rows = [('Task', 'Version', 'Run', 'Who', 'Dollars (API-equivalent)', 'Flag')]
+    table = [('Task', 'Version', 'Run', 'Who', 'Dollars (API-equivalent)', 'Flag')]
     notes = []
-    for d in details:
-        done = bool(d.get('finished'))
-        flag = ('check this' if d.get('check_this') else 'ok') if done else 'not finished'
-        flag += ' (practice)' if d.get('practice') else ''
-        rows.append((d['task'], d['version'], d['run'], d['who'],
-                     fmt.money(d['total_usd']) if done and d.get('total_usd') is not None else '-', flag))
-        if d.get('check_this'):
-            notes.append('%s: %s.' % (d['name'], '; '.join(d.get('check_reasons') or [])))
-    print(_table(rows), file=out)
+    for r in rows:
+        flag = 'check this' if r.get('check_this') == 'yes' else 'ok'
+        table.append((r['task'], r['version'], r['run'], r.get('who', ''), _dollars(r.get('total_usd_api_equivalent')),
+                      flag + (' (practice)' if r.get('practice') == 'yes' else '')))
+        if r.get('check_this') == 'yes':
+            notes.append('%s-%s-%s: %s.' % (r['task'], r['version'], r['run'], r.get('check_reasons', '')))
+    for d in waiting:
+        table.append((d['task'], d['version'], d['run'], d['who'], '-',
+                      'not finished' + (' (practice)' if d.get('practice') else '')))
+    print(_table(table), file=out)
     for note in notes:
         print(note, file=out)
     return 0
@@ -640,6 +797,137 @@ def command_update(env, args, out):
         raise KitError('The update did not work and nothing was changed. Check your internet connection and that VS '
                        'Code is signed in to GitHub, then try again. If it keeps failing, tell Adit.')
     print('Already up to date.' if 'up to date' in pulled[1].lower() else 'Updated to the latest version.', file=out)
+    return 0
+
+
+# ---------------------------------------------------------------- share and migrate
+
+def _git_lines(env, *args):
+    """The lines git printed for a command, or None when git is missing or the command failed."""
+    done = git(env, '-c', 'core.quotepath=off', *args)
+    return done[1].splitlines() if done is not None and done[0] == 0 else None
+
+
+def changed_outside_results(env):
+    """Paths with changes outside results/ (tracked, staged, or new and not ignored). None when git cannot say."""
+    tracked = _git_lines(env, 'diff', '--name-only', 'HEAD')
+    new = _git_lines(env, 'ls-files', '--others', '--exclude-standard')
+    if tracked is None or new is None:
+        return None
+    return sorted({path for path in tracked + new if path and not path.startswith(RESULTS_DIR + '/')})
+
+
+def command_share(env, args, out):
+    """kit share: commit results/ and nothing else, pull with rebase, push. Stops if anything else changed."""
+    who = (load_settings(env).get('who') or '').strip()
+    if not who:
+        raise KitError('I do not know your first name yet. Start a run once so I can save it, or tell Adit.')
+    if git(env, 'rev-parse', '--is-inside-work-tree') is None:
+        raise KitError('Git is not installed, or VS Code cannot find it, so I cannot share. Say "check my setup".')
+    outside = changed_outside_results(env)
+    if outside is None:
+        raise KitError('This folder is not a copy cloned from GitHub, or git could not read it, so I cannot share. '
+                       'Tell Adit.')
+    if outside:
+        shown = ', '.join(outside[:3]) + (' and %d more' % (len(outside) - 3) if len(outside) > 3 else '')
+        raise KitError('You have %d changed file%s outside the results folder (%s). Sharing sends results only, so I '
+                       'stopped and changed nothing. Tell Adit before you share.'
+                       % (len(outside), '' if len(outside) == 1 else 's', shown))
+    ahead = git(env, 'rev-list', '--count', '@{upstream}..HEAD')
+    if ahead[0] != 0 or not ahead[1].isdigit():
+        raise KitError('This copy is not linked to a branch on GitHub, so I cannot share. Tell Adit.')
+    staged = []
+    if env.results.is_dir():
+        if git(env, 'add', RESULTS_DIR + '/')[0] != 0:
+            raise KitError('Git could not add the results folder, so I stopped. Tell Adit.')
+        staged = _git_lines(env, 'diff', '--cached', '--name-only') or []
+    if not staged and ahead[1] == '0':
+        print('Nothing new to share. Finish a run first, then say "share my results".', file=out)
+        return 0
+    message = None
+    if staged:
+        names = sorted({m.group(1) for m in (re.match(r'^results/run-details/(.+)\.json$', p) for p in staged) if m})
+        message = 'Results: %s, %s' % (who, ', '.join(names) or 'results')
+        if git(env, 'commit', '-m', message)[0] != 0:
+            raise KitError('Git could not save your results as a commit. If it needs your name and email, tell Adit. '
+                           'Nothing was sent.')
+    if git(env, 'pull', '--rebase')[0] != 0:
+        git(env, 'rebase', '--abort')  # leave no half-finished rebase behind
+        raise KitError('Getting the latest from GitHub did not work, so I stopped before sending anything. Your '
+                       'results are saved on this laptop and nothing was lost. Check your internet connection, then '
+                       'say "share my results" again. If it keeps failing, tell Adit.')
+    if git(env, 'push')[0] != 0:
+        raise KitError('Sending to GitHub did not work. Your results are saved on this laptop and nothing was lost. '
+                       'Check your internet connection and that VS Code is signed in to GitHub, then say "share my '
+                       'results" again. If it keeps failing, tell Adit.')
+    print('Shared with the group: %s' % message if message else 'Shared your earlier saved results with the group.',
+          file=out)
+    if staged:
+        print('%d file%s from results/ sent to GitHub.' % (len(staged), '' if len(staged) == 1 else 's'), file=out)
+    return 0
+
+
+def _move_one_run(env, old, details, rows):
+    """Copy one finished run from the old runs folder into results/. Returns a list of plain notes."""
+    name, notes = details['name'], []
+    row = rows.get((details['task'], details['version'], str(details['run'])))
+    if not row or not _WHO.match(str(details.get('who', ''))):
+        return ['%s has no results row or no valid first name, so I left it out.' % name]
+    page = old / (name + '.receipt.html')
+    if page.is_file():
+        receipt_path(env, name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(page), str(receipt_path(env, name)))
+    else:
+        notes.append('%s has no receipt page to copy.' % name)
+    if (old / name).is_dir():
+        _, more = copy_outputs(env, details, old / name)
+        notes += more
+    else:
+        notes.append('%s has no run folder, so no outputs were copied.' % name)
+    upsert_result(env, {c: row.get(c, '') for c in CSV_COLUMNS})
+    write_details(env.results, public_details(details))
+    return notes
+
+
+def command_migrate(env, args, out):
+    """kit migrate: copy the finished runs of the old runs folder into results/, then rename that folder to the
+    scratch folder when nothing in it is still running. Deletes nothing."""
+    old = Path(args.folder).expanduser() if args.folder else env.home / LEGACY_RUNS_NAME
+    scratch = scratch_folder(env)
+    if not old.is_dir():
+        raise KitError('I found no old runs folder at %s, so there is nothing to move.' % old)
+    if old.resolve() == scratch.resolve():
+        raise KitError('%s is already the scratch folder, so there is nothing to move.' % old)
+    rows = {}
+    if (old / 'results.csv').is_file():
+        with open(str(old / 'results.csv'), newline='', encoding='utf-8') as handle:
+            rows = {(r.get('task'), r.get('version'), r.get('run')): r for r in csv.DictReader(handle)}
+    already = {d['name'] for d in _read_details_in(env.results)}
+    moved, notes, waiting = [], [], []
+    for details in sorted(_read_details_in(old), key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO):
+        if not details.get('finished'):
+            waiting.append(details['name'])
+        elif details['name'] in already:
+            notes.append('%s is already in results/, so I left it alone.' % details['name'])
+        else:
+            more = _move_one_run(env, old, details, rows)
+            notes += more
+            if (env.results / DETAILS_DIR / (details['name'] + '.json')).is_file():
+                moved.append(details['name'])
+    print('Copied %d run%s into %s%s' % (len(moved), '' if len(moved) == 1 else 's', env.results,
+                                         (': ' + ', '.join(moved)) if moved else '.'), file=out)
+    for note in notes:
+        print(note, file=out)
+    if waiting:
+        print('Not finished, so I left the old folder where it is: %s.' % ', '.join(waiting), file=out)
+    elif scratch.is_dir() and not any(scratch.iterdir()):
+        scratch.rmdir()  # an empty folder the kit made itself, so the rename can go ahead
+    if not waiting and not scratch.exists():
+        old.rename(scratch)
+        print('Renamed %s to %s. I deleted nothing.' % (old, scratch), file=out)
+    elif not waiting:
+        print('%s already holds files, so I left %s as it is. I deleted nothing. It can be cleared once you have '
+              'checked results/.' % (scratch, old), file=out)
     return 0
 
 
@@ -686,33 +974,33 @@ def check_git(env):
     return True, 'The tool is up to date with GitHub.'
 
 
-def check_runs_folder(env):
-    """(ok, text) for whether the runs folder exists or can be made."""
-    runs = runs_folder(env)
+def check_scratch_folder(env):
+    """(ok, text) for whether the scratch folder exists or can be made."""
+    scratch = scratch_folder(env)
     try:
-        runs.mkdir(parents=True, exist_ok=True)
+        scratch.mkdir(parents=True, exist_ok=True)
     except OSError:
-        return False, ('I cannot make the runs folder %s. Tell Adit; the runs folder can be moved in %s.'
-                       % (runs, SETTINGS_NAME))
-    if not os.access(str(runs), os.W_OK):
-        return False, 'I cannot write to the runs folder %s. Tell Adit.' % runs
-    return True, 'The runs folder is ready: %s' % runs
+        return False, ('I cannot make the scratch folder %s. Tell Adit; the scratch folder can be moved in %s.'
+                       % (scratch, SETTINGS_NAME))
+    if not os.access(str(scratch), os.W_OK):
+        return False, 'I cannot write to the scratch folder %s. Tell Adit.' % scratch
+    return True, 'The scratch folder is ready: %s' % scratch
 
 
 INSTRUCTION_FILES = ('CLAUDE.md', 'CLAUDE.local.md', 'AGENTS.md', os.path.join('.claude', 'CLAUDE.md'))
 
 
 def check_parents(env):
-    """(ok, text) for whether an instruction file sits above the runs folder (it would change every run)."""
-    runs = runs_folder(env)
-    for folder in [runs] + list(runs.parents):
+    """(ok, text) for whether an instruction file sits above the scratch folder (it would change every run)."""
+    scratch = scratch_folder(env)
+    for folder in [scratch] + list(scratch.parents):
         for name in INSTRUCTION_FILES:
             found = folder / name
             if found.is_file():
-                return False, ('The file %s sits above the runs folder. Claude Code reads it in every run, which adds '
-                               'text to the prompt and changes the cost. Tell Adit; the runs folder needs to move, or '
+                return False, ('The file %s sits above the scratch folder. Claude Code reads it in every run, which adds '
+                               'text to the prompt and changes the cost. Tell Adit; the scratch folder needs to move, or '
                                'the file does.' % found)
-    return True, 'No CLAUDE.md or AGENTS.md sits above the runs folder.'
+    return True, 'No CLAUDE.md or AGENTS.md sits above the scratch folder.'
 
 
 def check_demo():
@@ -731,7 +1019,7 @@ def check_demo():
 
 def command_check(env, args, out):
     """kit check: one line per item, then Ready or Not ready."""
-    results = [check_python(), check_sessions(env), check_git(env), check_runs_folder(env), check_parents(env),
+    results = [check_python(), check_sessions(env), check_git(env), check_scratch_folder(env), check_parents(env),
                check_demo()]
     for ok, text in results:
         print(('OK: ' if ok else 'FIX: ') + text, file=out)
@@ -751,7 +1039,7 @@ class PlainParser(argparse.ArgumentParser):
 
 
 def make_parser():
-    """The command line: check, start, finish, receipt, prompt, runs, update."""
+    """The command line: check, start, finish, receipt, prompt, runs, share, update, migrate."""
     parser = PlainParser(prog='python3 -m src.kit', description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True, parser_class=PlainParser)
     commands.add_parser('check', help='check that everything is ready')
@@ -769,19 +1057,23 @@ def make_parser():
     again = commands.add_parser('prompt', help='show a run\'s prompt again')
     again.add_argument('run_name', nargs='?')
     commands.add_parser('runs', help='list the runs')
+    commands.add_parser('share', help='send your results to the group')
     commands.add_parser('update', help='get the latest version of the tool')
+    move = commands.add_parser('migrate', help='move the runs of the old runs folder into results/')
+    move.add_argument('folder', nargs='?')
     return parser
 
 
 COMMANDS = {'check': command_check, 'start': command_start, 'finish': command_finish,
-            'receipt': command_receipt, 'prompt': command_prompt, 'runs': command_runs, 'update': command_update}
+            'receipt': command_receipt, 'prompt': command_prompt, 'runs': command_runs, 'share': command_share,
+            'update': command_update, 'migrate': command_migrate}
 
 
-def inside_runs_folder(env, cwd):
-    """True when the command was run from inside the runs folder (a run window, not this one)."""
-    runs = runs_folder(env).resolve()
+def inside_scratch_folder(env, cwd):
+    """True when the command was run from inside the scratch folder (a run window, not this one)."""
+    scratch = scratch_folder(env).resolve()
     here = Path(cwd).resolve()
-    return here == runs or runs in here.parents
+    return here == scratch or scratch in here.parents
 
 
 def main(argv=None, out=None, env=None, cwd=None):
@@ -792,7 +1084,7 @@ def main(argv=None, out=None, env=None, cwd=None):
     env = env or Env()
     try:
         args = make_parser().parse_args(argv)
-        if args.command != 'check' and inside_runs_folder(env, cwd or Path.cwd()):
+        if args.command != 'check' and inside_scratch_folder(env, cwd or Path.cwd()):
             raise KitError(GO_BACK)
         return COMMANDS[args.command](env, args, out)
     except KitError as error:

@@ -1,0 +1,15 @@
+{
+  "name": "sample-lean-1",
+  "task": "sample",
+  "version": "lean",
+  "run": 1,
+  "who": "Adit",
+  "started": "2026-11-12T03:47:40-05:00",
+  "finished": "2026-11-12T04:02:07.717-05:00",
+  "practice": true,
+  "model": "claude-sonnet-5-5",
+  "session_id": "d3decdd6-5556-4011-82eb-4d23d0a08e02",
+  "total_usd": 0.1387089,
+  "check_this": false,
+  "check_reasons": []
+}

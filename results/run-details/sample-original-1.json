@@ -1,0 +1,17 @@
+{
+  "name": "sample-original-1",
+  "task": "sample",
+  "version": "original",
+  "run": 1,
+  "who": "Adit",
+  "started": "2026-11-12T11:07:09.268-05:00",
+  "finished": "2026-11-12T11:08:34.474-05:00",
+  "practice": true,
+  "prompt": "Please read the two text files in this folder, garden-log.txt and garden-plan.txt, and write a one-paragraph summary of them. Save the summary as summary.md. Take a careful look at both files before you start writing.",
+  "model": "claude-sonnet-5-5",
+  "effort": "high",
+  "session_id": "a4beb26d-1f25-4f56-9d21-fe933477d3c8",
+  "total_usd": 0.13946440000000002,
+  "check_this": false,
+  "check_reasons": []
+}

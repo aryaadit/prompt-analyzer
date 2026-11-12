@@ -1,5 +1,6 @@
 """Tests for src/kit.py and the Windows-path handling. No test opens a window, a browser, or the clipboard,
-runs a command, or spends model usage. Every session here is an invented fixture."""
+or spends model usage, and none touches the network. Every session here is an invented fixture. Only the share
+tests run a command: local git, in temporary repos."""
 import csv
 import html
 import io
@@ -7,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,8 +19,8 @@ from tests.helpers import SESSION_3
 from tests.make_demo_session import write_demo_session
 
 REPO_SAMPLE = Path(kit.REPO) / 'experiments' / 'tasks' / 'sample'
-WINDOWS_CWD = 'C:\\Users\\Anna\\prompt-analyzer-runs\\sample-lean-1'
-WINDOWS_FOLDER = 'C--Users-Anna-prompt-analyzer-runs-sample-lean-1'
+WINDOWS_CWD = 'C:\\Users\\Anna\\prompt-analyzer-scratch\\sample-lean-1'
+WINDOWS_FOLDER = 'C--Users-Anna-prompt-analyzer-scratch-sample-lean-1'
 
 
 class KitCase(unittest.TestCase):
@@ -32,7 +34,8 @@ class KitCase(unittest.TestCase):
         self.home.mkdir()
         shutil.copytree(str(REPO_SAMPLE), str(self.repo / 'experiments' / 'tasks' / 'sample'))
         self.env = kit.Env(home=self.home, repo=self.repo)
-        self.runs = self.home / kit.DEFAULT_RUNS_NAME
+        self.runs = self.home / kit.DEFAULT_SCRATCH_NAME  # the scratch folder
+        self.results_dir = self.repo / kit.RESULTS_DIR
         patches = {
             'clipboard': mock.patch.object(kit, 'copy_to_clipboard', return_value=True),
             'vscode': mock.patch.object(kit, 'open_in_vscode', return_value=True),
@@ -69,8 +72,9 @@ class KitCase(unittest.TestCase):
         self.assertEqual(code, 0, text)
         return sorted(self.runs.glob('sample-%s-*' % version))[-1]
 
-    def results(self):
-        with open(str(self.runs / kit.RESULTS_NAME), newline='', encoding='utf-8') as handle:
+    def results(self, who='anna'):
+        """The rows of one person's results file."""
+        with open(str(self.results_dir / (who + '.csv')), newline='', encoding='utf-8') as handle:
             return list(csv.DictReader(handle))
 
     def edited_copy(self, name, change):
@@ -96,7 +100,7 @@ class CheckTest(KitCase):
         self.assertTrue(text.rstrip().endswith('Ready to run'))
         self.assertNotIn('sess-0003', text)
         self.assertTrue(all(line.startswith(('OK: ', 'FIX: ')) or line == 'Ready to run' for line in text.splitlines()))
-        self.assertTrue(self.runs.is_dir())  # the runs folder was made
+        self.assertTrue(self.runs.is_dir())  # the scratch folder was made
 
     def test_with_no_sessions_it_says_so_in_the_exact_words(self):
         code, text = self.say('check')
@@ -105,7 +109,7 @@ class CheckTest(KitCase):
                       'for this class, tell Adit.', text)
         self.assertTrue(text.rstrip().endswith('Not ready: fix the items above'))
 
-    def test_a_claude_md_above_the_runs_folder_is_named(self):
+    def test_a_claude_md_above_the_scratch_folder_is_named(self):
         self.make_session()
         (self.home / 'CLAUDE.md').write_text('invented', encoding='utf-8')
         code, text = self.say('check')
@@ -121,10 +125,10 @@ class CheckTest(KitCase):
         self.assertEqual(code, 1)
         self.assertIn(str(self.home.parent / 'AGENTS.md'), text)
 
-    def test_a_custom_runs_folder_is_used_and_checked(self):
+    def test_a_custom_scratch_folder_is_used_and_checked(self):
         self.make_session()
-        elsewhere = self.home / 'elsewhere' / 'my-runs'
-        self.env.settings_path.write_text(json.dumps({'runs_folder': str(elsewhere)}), encoding='utf-8')
+        elsewhere = self.home / 'elsewhere' / 'my-scratch'
+        self.env.settings_path.write_text(json.dumps({'scratch_folder': str(elsewhere)}), encoding='utf-8')
         code, text = self.say('check')
         self.assertEqual(code, 0, text)
         self.assertTrue(elsewhere.is_dir())
@@ -228,6 +232,13 @@ class StartTest(KitCase):
         self.assertIn('File, then Open Folder', text)
         self.assertIn(str(self.runs / 'sample-lean-1'), text)
 
+    def test_a_first_name_that_is_not_letters_is_refused_because_it_becomes_a_file_name(self):
+        for bad in ('../Anna', 'Anna Lee', 'a/b', 'Anna.csv'):
+            code, text = self.say('start', 'sample', 'lean', '--who', bad)
+            self.assertEqual(code, 2, bad)
+            self.assertIn('letters only', text)
+        self.assertFalse(self.runs.exists())
+
     def test_the_first_name_is_remembered_and_is_needed_once(self):
         code, text = self.say('start', 'sample', 'lean')
         self.assertEqual(code, 2)
@@ -255,6 +266,10 @@ class StartTest(KitCase):
         self.assertNotIn('Traceback', text)
         self.assertNotIn('usage:', text)
 
+    def test_next_steps_end_with_sharing_the_results(self):
+        _, text = self.say('start', 'sample', 'lean', '--who', 'Anna')
+        self.assertTrue(text.rstrip().endswith('9. Then say: share my results'))
+
     def test_commands_run_from_inside_a_run_folder_are_refused(self):
         folder = self.start('lean')
         out = io.StringIO()
@@ -273,20 +288,39 @@ class FinishTest(KitCase):
         self.assertEqual(code, 0, text)
         return folder, text
 
-    def test_it_finds_the_session_builds_the_receipt_and_prints_four_lines(self):
+    def test_it_finds_the_session_builds_the_receipt_and_names_where_everything_went(self):
         folder, text = self.finish_clean_run()
         lines = text.splitlines()
-        self.assertEqual(len(lines), 4, text)
+        self.assertEqual(len(lines), 8, text)
         self.assertTrue(lines[0].startswith('Total: $'))
         self.assertIn('API-equivalent', lines[0])
         self.assertTrue(lines[1].startswith('Largest cause: '))
         self.assertTrue(lines[2].startswith('Most expensive step: step '))
         self.assertIn('(estimated)', lines[2])
-        page = self.runs / 'sample-lean-1.receipt.html'
+        page = self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html'
         self.assertEqual(lines[3], 'Receipt: %s' % page)
         self.assertTrue(page.is_file())
-        self.assertNotIn(page.name, [p.name for p in folder.iterdir()])  # the receipt sits next to the run
+        self.assertNotIn(page.name, [p.name for p in folder.iterdir()])  # the receipt is not in the run folder
         self.mocks['browser'].assert_called_once_with(page)
+        self.assertEqual(lines[4], 'Outputs: the run made no new files, so nothing was copied.')
+        self.assertEqual(lines[5], 'Results: row saved in %s' % (self.results_dir / 'anna.csv'))
+        self.assertIn('the scratch folder %s can be cleared. I deleted nothing.' % self.runs, lines[6])
+        self.assertEqual(lines[7], 'Last step: say "share my results" to send this to the group.')
+
+    def test_the_scratch_folder_is_left_in_place_and_nothing_is_written_next_to_it(self):
+        folder, _ = self.finish_clean_run()
+        self.assertTrue(folder.is_dir())
+        self.assertEqual(sorted(p.name for p in self.runs.iterdir()), [kit.DETAILS_DIR, 'sample-lean-1'])
+        self.assertEqual(sorted(p.name for p in self.results_dir.iterdir()),
+                         sorted(['anna.csv', kit.DETAILS_DIR, kit.RECEIPTS_DIR]))
+
+    def test_the_committed_details_record_has_no_path_from_this_laptop(self):
+        self.finish_clean_run()
+        public = json.loads((self.results_dir / kit.DETAILS_DIR / 'sample-lean-1.json').read_text(encoding='utf-8'))
+        self.assertNotIn('folder', public)
+        self.assertTrue(public['finished'])
+        self.assertNotIn(str(self.home), json.dumps(public))
+        self.assertIn('folder', json.loads((self.runs / kit.DETAILS_DIR / 'sample-lean-1.json').read_text()))
 
     def test_the_largest_cause_line_uses_the_same_rule_as_the_receipt_headline(self):
         """In this fixture the starting context (53 percent) is the largest cause, and it is not a step."""
@@ -298,7 +332,7 @@ class FinishTest(KitCase):
         self.assertIn("Claude Code's starting context (fixed overhead, sent before any work)", line)
         self.assertIn('53% of the total (estimated)', line)
         self.assertIn(found['cause'], line)
-        page = (self.runs / 'sample-lean-1.receipt.html').read_text(encoding='utf-8')
+        page = (self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html').read_text(encoding='utf-8')
         shown = re.search(r'<p class="headline">(.*?)</p>', page, re.S).group(1)
         plain = html.unescape(re.sub(r'<[^>]+>', '', shown)).strip()
         self.assertEqual(plain.removesuffix(' est.'), found['sentence'])  # the page says the same thing (plus its est. badge)
@@ -355,6 +389,7 @@ class FinishTest(KitCase):
         for name, (path, reason) in cases.items():
             with self.subTest(name):
                 shutil.rmtree(str(self.runs), ignore_errors=True)
+                shutil.rmtree(str(self.results_dir), ignore_errors=True)
                 folder = self.start('lean')
                 self.put_session(folder, path, name='sess-%s.jsonl' % name)
                 code, text = self.say('finish')
@@ -434,7 +469,7 @@ class FinishTest(KitCase):
         self.assertEqual(kit.CSV_COLUMNS[kit.CSV_COLUMNS.index('model') + 1], 'effort')
         self.assertEqual([r['effort'] for r in self.results()], ['high', 'high'])
         self.assertEqual([r['check_this'] for r in self.results()], ['no', 'no'])
-        details = json.loads(next((self.runs / kit.DETAILS_DIR).glob('sample-lean-1.json')).read_text())
+        details = json.loads((self.results_dir / kit.DETAILS_DIR / 'sample-lean-1.json').read_text())
         self.assertEqual(details['effort'], 'high')
 
     def test_a_run_at_a_different_effort_from_the_first_run_is_flagged_in_plain_words(self):
@@ -480,8 +515,8 @@ class FinishTest(KitCase):
 
     def test_an_older_results_file_without_an_effort_column_is_upgraded_not_broken(self):
         old = [c for c in kit.CSV_COLUMNS if c != 'effort']
-        self.runs.mkdir(parents=True, exist_ok=True)
-        with open(str(self.runs / kit.RESULTS_NAME), 'w', newline='', encoding='utf-8') as handle:
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+        with open(str(self.results_dir / 'anna.csv'), 'w', newline='', encoding='utf-8') as handle:
             writer = csv.DictWriter(handle, fieldnames=old)
             writer.writeheader()
             writer.writerow({c: 'x' for c in old} | {'task': 'other', 'version': 'lean', 'run': '1'})
@@ -494,7 +529,7 @@ class FinishTest(KitCase):
         code, text = self.say('finish')
         self.assertEqual(code, 2)
         self.assertIn('cannot find a Claude Code session for sample-lean-1', text)
-        self.assertFalse((self.runs / kit.RESULTS_NAME).exists())
+        self.assertFalse((self.results_dir / 'anna.csv').exists())
 
     def test_two_sessions_stops_and_does_not_guess(self):
         folder = self.start('lean')
@@ -504,8 +539,8 @@ class FinishTest(KitCase):
         self.assertEqual(code, 2)
         self.assertIn('found 2 Claude Code sessions', text)
         self.assertIn('will not guess', text)
-        self.assertFalse((self.runs / kit.RESULTS_NAME).exists())
-        self.assertFalse((self.runs / 'sample-lean-1.receipt.html').exists())
+        self.assertFalse((self.results_dir / 'anna.csv').exists())
+        self.assertFalse((self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html').exists())
 
     def test_the_default_is_the_most_recent_unfinished_run(self):
         first, second = self.start('lean'), self.start('lean')
@@ -546,7 +581,7 @@ class PromptAgainTest(KitCase):
         self.put_session(folder, SESSION_3)
         self.say('finish')
         self.assertNotIn('prompt', ' '.join(p.name for p in folder.iterdir()).lower())
-        text = (self.runs / kit.RESULTS_NAME).read_text(encoding='utf-8')
+        text = (self.results_dir / 'anna.csv').read_text(encoding='utf-8')
         self.assertNotIn(self.expected('lean'), text)
 
     def test_it_copies_the_latest_runs_prompt_and_prints_it_between_two_lines(self):
@@ -648,15 +683,15 @@ class ReceiptAndRunsTest(KitCase):
         self.mocks['browser'].reset_mock()
         code, text = self.say('receipt', 'latest')
         self.assertEqual(code, 0, text)
-        self.assertEqual(text.strip(), 'Receipt: %s' % (self.runs / 'sample-lean-1.receipt.html'))
-        self.mocks['browser'].assert_called_once_with(self.runs / 'sample-lean-1.receipt.html')
+        self.assertEqual(text.strip(), 'Receipt: %s' % (self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html'))
+        self.mocks['browser'].assert_called_once_with(self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html')
 
     def test_a_receipt_is_built_when_it_is_missing(self):
         folder = self.start('lean')
         self.put_session(folder, SESSION_3)
         code, text = self.say('receipt', 'sample-lean-1')
         self.assertEqual(code, 0, text)
-        self.assertTrue((self.runs / 'sample-lean-1.receipt.html').is_file())
+        self.assertTrue((self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html').is_file())
 
     def test_receipt_with_nothing_finished_is_a_plain_message(self):
         code, text = self.say('receipt')
@@ -699,6 +734,405 @@ class UpdateTest(KitCase):
         self.assertIn('Already up to date.', text)
         self.assertIn(('pull', '--ff-only'), calls)
         self.assertTrue(all(c[0] in ('status', 'pull') for c in calls))
+
+
+# ---------------------------------------------------------------- what the run made, and the shared results
+
+class OutputsTest(KitCase):
+    def finish_with_files(self, files, version='lean', who='Anna'):
+        """Start a run, let 'the agent' write the given files (name -> bytes) in it, and finish it."""
+        folder = self.start(version, who)
+        for name, data in files.items():
+            target = folder / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        self.put_session(folder, SESSION_3)
+        code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        return folder, text
+
+    def outputs(self, name='sample-lean-1'):
+        base = self.results_dir / kit.OUTPUTS_DIR / name
+        return sorted(p.relative_to(base).as_posix() for p in base.rglob('*') if p.is_file()) if base.is_dir() else []
+
+    def test_only_files_the_run_created_or_changed_are_copied(self):
+        start_name = sorted(p.name for p in (REPO_SAMPLE / 'start').iterdir())[0]
+        changed = (REPO_SAMPLE / 'start' / start_name).read_bytes() + b'\nadded by the agent\n'
+        _, text = self.finish_with_files({'summary.md': b'one paragraph', 'notes/extra.txt': b'x', start_name: changed})
+        self.assertEqual(self.outputs(), sorted([start_name, 'notes/extra.txt', 'summary.md']))
+        base = self.results_dir / kit.OUTPUTS_DIR / 'sample-lean-1'
+        self.assertEqual((base / 'summary.md').read_bytes(), b'one paragraph')
+        self.assertEqual((base / start_name).read_bytes(), changed)
+        self.assertIn('Outputs: 3 files copied to %s' % base, text)
+
+    def test_unchanged_start_files_are_not_copied(self):
+        self.finish_with_files({'summary.md': b'one paragraph'})
+        names = self.outputs()
+        self.assertEqual(names, ['summary.md'])
+        for start_file in (REPO_SAMPLE / 'start').iterdir():
+            self.assertNotIn(start_file.name, names)
+
+    def test_a_file_over_5_mb_is_skipped_and_named(self):
+        big = b'x' * (kit.MAX_OUTPUT_BYTES + 1)
+        exact = b'y' * kit.MAX_OUTPUT_BYTES
+        _, text = self.finish_with_files({'big.bin': big, 'exactly-5mb.bin': exact, 'summary.md': b'ok'})
+        self.assertEqual(self.outputs(), ['exactly-5mb.bin', 'summary.md'])
+        self.assertIn('Skipped big.bin: it is 5.0 MB, over the 5 MB limit.', text)
+        self.assertIn('Outputs: 2 files copied', text)
+
+    def test_tooling_folders_junk_files_and_links_are_not_outputs(self):
+        folder = self.start('lean')
+        for name in ('.claude/settings.local.json', '.git/config', 'node_modules/x/index.js', '.DS_Store'):
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text('x', encoding='utf-8')
+        (folder / 'summary.md').write_text('ok', encoding='utf-8')
+        secret = Path(self.tmp.name) / 'outside-secret.txt'
+        secret.write_text('not the run\'s file', encoding='utf-8')
+        try:
+            os.symlink(str(secret), str(folder / 'link.txt'))
+            os.symlink(str(secret.parent), str(folder / 'linked-folder'))
+        except (OSError, NotImplementedError):
+            pass  # a machine that cannot make links has nothing to skip
+        self.put_session(folder, SESSION_3)
+        self.assertEqual(self.say('finish')[0], 0)
+        self.assertEqual(self.outputs(), ['summary.md'])
+
+    def test_a_file_that_cannot_be_copied_is_reported_and_the_run_is_still_recorded(self):
+        folder = self.start('lean')
+        (folder / 'summary.md').write_text('ok', encoding='utf-8')
+        self.put_session(folder, SESSION_3)
+        real = shutil.copy2
+        with mock.patch('shutil.copy2', side_effect=OSError('disk full')):
+            code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        self.assertIn('Could not copy summary.md.', text)
+        self.assertEqual(len(self.results()), 1)
+        self.assertIs(shutil.copy2, real)
+
+    def test_finishing_a_named_run_again_overwrites_its_outputs_and_keeps_one_row(self):
+        folder, _ = self.finish_with_files({'summary.md': b'first'})
+        (folder / 'summary.md').write_bytes(b'second')
+        self.assertEqual(self.say('finish', 'sample-lean-1')[0], 0)
+        self.assertEqual((self.results_dir / kit.OUTPUTS_DIR / 'sample-lean-1' / 'summary.md').read_bytes(), b'second')
+        self.assertEqual(len(self.results()), 1)
+
+    def test_practice_runs_are_marked_practice_in_every_place(self):
+        self.finish_with_files({'summary.md': b'ok'})
+        self.assertEqual(self.results()[0]['practice'], 'yes')
+        details = json.loads((self.results_dir / kit.DETAILS_DIR / 'sample-lean-1.json').read_text(encoding='utf-8'))
+        self.assertTrue(details['practice'])
+        _, text = self.say('runs')
+        self.assertIn('ok (practice)', text)
+
+
+class SharedResultsTest(KitCase):
+    def finish_as(self, who, version='lean'):
+        folder = self.start(version, who)
+        self.put_session(folder, SESSION_3)
+        self.assertEqual(self.say('finish')[0], 0)
+
+    def test_each_person_has_their_own_results_file_named_in_lower_case(self):
+        self.finish_as('Anna')
+        self.finish_as('Reid', 'original')
+        self.assertEqual(sorted(p.name for p in self.results_dir.glob('*.csv')), ['anna.csv', 'reid.csv'])
+        self.assertEqual(self.results('anna')[0]['who'], 'Anna')  # the name in the row keeps its capital
+        self.assertEqual(self.results('reid')[0]['who'], 'Reid')
+
+    def test_show_the_runs_merges_every_results_file_and_the_unfinished_runs(self):
+        self.finish_as('Anna')
+        self.finish_as('Reid', 'original')
+        self.start('original', 'Reid')  # started here, not finished
+        code, text = self.say('runs')
+        lines = text.splitlines()
+        self.assertEqual(lines[0].split(), ['Task', 'Version', 'Run', 'Who', 'Dollars', '(API-equivalent)', 'Flag'])
+        self.assertEqual([l.split()[:4] for l in lines[1:]], [['sample', 'lean', '1', 'Anna'], ['sample', 'original', '1', 'Reid'],
+                                                              ['sample', 'original', '2', 'Reid']])
+        self.assertIn('not finished', lines[3])
+        self.assertIn('$', lines[1])
+
+    def test_a_teammates_runs_come_from_results_and_do_not_need_a_scratch_folder(self):
+        self.finish_as('Anna')
+        shutil.rmtree(str(self.runs))
+        _, text = self.say('runs')
+        self.assertIn('Anna', text)
+
+    def test_run_numbers_skip_runs_already_in_the_shared_results(self):
+        self.finish_as('Anna')
+        shutil.rmtree(str(self.runs))  # a clean laptop that has pulled Anna's results
+        self.assertEqual(self.start('lean', 'Reid').name, 'sample-lean-2')
+
+    def test_a_run_name_that_belongs_to_someone_else_is_never_overwritten(self):
+        self.finish_as('Anna')
+        folder = self.start('original', 'Reid')
+        details_path = self.results_dir / kit.DETAILS_DIR / 'sample-original-1.json'
+        # Anna's results for the same name arrive after Reid started it:
+        other = json.loads((self.results_dir / kit.DETAILS_DIR / 'sample-lean-1.json').read_text(encoding='utf-8'))
+        other.update(name='sample-original-1', version='original', who='Anna')
+        details_path.write_text(json.dumps(other), encoding='utf-8')
+        self.put_session(folder, SESSION_3)
+        code, text = self.say('finish', 'sample-original-1')
+        self.assertEqual(code, 2)
+        self.assertIn('already in the shared results and belongs to Anna', text)
+        self.assertEqual(json.loads(details_path.read_text(encoding='utf-8'))['who'], 'Anna')
+        self.assertFalse((self.results_dir / 'reid.csv').exists())
+
+    def test_show_me_the_receipt_and_the_prompt_mean_my_own_latest_run(self):
+        self.finish_as('Reid', 'original')
+        self.finish_as('Anna')  # Anna's run is the newest of all, and is the one on this laptop's settings
+        self.finish_as('Reid', 'lean')
+        self.env.settings_path.write_text(json.dumps({'who': 'Anna'}), encoding='utf-8')
+        _, text = self.say('receipt', 'latest')
+        self.assertIn('sample-lean-1.receipt.html', text)
+        self.mocks['clipboard'].reset_mock()
+        self.say('prompt')
+        self.mocks['clipboard'].assert_called_once()
+
+    def test_a_damaged_results_file_or_details_file_is_skipped_not_fatal(self):
+        self.finish_as('Anna')
+        (self.results_dir / 'broken.csv').write_bytes(b'\xff\xfe\x00bad')
+        (self.results_dir / kit.DETAILS_DIR / 'bad.json').write_text('{not json', encoding='utf-8')
+        (self.results_dir / kit.DETAILS_DIR / 'evil.json').write_text(json.dumps({'name': '../../escape'}), encoding='utf-8')
+        code, text = self.say('runs')
+        self.assertEqual(code, 0, text)
+        self.assertIn('Anna', text)
+        self.assertEqual([d['name'] for d in kit.read_all_details(self.env)], ['sample-lean-1'])
+
+
+@unittest.skipUnless(shutil.which('git'), 'git is not installed')
+class ShareTest(unittest.TestCase):
+    """The share command against real git, in temporary folders: a bare 'GitHub' and two clones. No network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        self.git_in(self.base, 'init', '--bare', '-b', 'main', 'github.git')
+        self.anna = self.clone('anna', 'Anna')
+        (self.anna / 'README.md').write_text('project', encoding='utf-8')
+        (self.anna / '.gitignore').write_text('local-settings.json\n', encoding='utf-8')
+        self.git_in(self.anna, 'add', '.')
+        self.git_in(self.anna, 'commit', '-m', 'start')
+        self.git_in(self.anna, 'push', '-u', 'origin', 'main')
+        self.reid = self.clone('reid', 'Reid')
+        self.git_in(self.reid, 'checkout', '-B', 'main', 'origin/main')
+        self.git_in(self.reid, 'branch', '--set-upstream-to=origin/main', 'main')
+
+    def git_in(self, folder, *args):
+        done = subprocess.run(['git'] + list(args), cwd=str(folder), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def clone(self, name, who):
+        self.git_in(self.base, 'clone', str(self.base / 'github.git'), name)
+        folder = self.base / name
+        self.git_in(folder, 'config', 'user.name', who)
+        self.git_in(folder, 'config', 'user.email', who.lower() + '@example.com')
+        (folder / 'local-settings.json').write_text(json.dumps({'who': who}), encoding='utf-8')
+        return folder
+
+    def share(self, folder):
+        out = io.StringIO()
+        env = kit.Env(home=self.base / 'home', repo=folder)
+        code = kit.main(['share'], out=out, env=env, cwd=folder)
+        return code, out.getvalue()
+
+    def add_run(self, folder, who, run='sample-lean-1', extra=None):
+        results = folder / 'results'
+        (results / 'run-details').mkdir(parents=True, exist_ok=True)
+        (results / ('%s.csv' % who.lower())).write_text('task\nsample\n', encoding='utf-8')
+        (results / 'run-details' / (run + '.json')).write_text(json.dumps({'name': run, 'who': who}), encoding='utf-8')
+        (results / 'outputs' / run).mkdir(parents=True, exist_ok=True)
+        (results / 'outputs' / run / 'summary.md').write_text('made up', encoding='utf-8')
+        for name, text in (extra or {}).items():
+            (folder / name).write_text(text, encoding='utf-8')
+
+    def test_it_commits_results_only_with_a_plain_message_and_pushes(self):
+        self.add_run(self.anna, 'Anna')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 0, text)
+        self.assertIn('Shared with the group: Results: Anna, sample-lean-1', text)
+        self.assertEqual(self.git_in(self.anna, 'log', '-1', '--format=%s'), 'Results: Anna, sample-lean-1')
+        self.assertEqual(self.git_in(self.anna, 'log', '-1', '--format=%s', 'origin/main'), 'Results: Anna, sample-lean-1')
+        files = self.git_in(self.anna, 'show', '--name-only', '--format=', 'HEAD').splitlines()
+        self.assertTrue(files and all(f.startswith('results/') for f in files), files)
+        self.assertEqual(self.git_in(self.anna, 'status', '--porcelain'), '')
+
+    def test_several_runs_are_named_in_the_message(self):
+        self.add_run(self.anna, 'Anna', 'sample-lean-1')
+        self.add_run(self.anna, 'Anna', 'sample-original-1')
+        self.assertEqual(self.share(self.anna)[0], 0)
+        self.assertEqual(self.git_in(self.anna, 'log', '-1', '--format=%s'), 'Results: Anna, sample-lean-1, sample-original-1')
+
+    def test_a_change_outside_results_stops_everything_and_changes_nothing(self):
+        for change in ('edit', 'new', 'staged'):
+            with self.subTest(change):
+                self.git_in(self.anna, 'reset', '--hard', 'HEAD')
+                self.git_in(self.anna, 'clean', '-fdq', '--', 'results', 'notes.txt')
+                self.add_run(self.anna, 'Anna')
+                if change == 'edit':
+                    (self.anna / 'README.md').write_text('changed', encoding='utf-8')
+                else:
+                    (self.anna / 'notes.txt').write_text('mine', encoding='utf-8')
+                    if change == 'staged':
+                        self.git_in(self.anna, 'add', 'notes.txt')
+                before = self.git_in(self.anna, 'rev-parse', 'HEAD')
+                code, text = self.share(self.anna)
+                self.assertEqual(code, 2)
+                self.assertIn('outside the results folder', text)
+                self.assertIn('I stopped and changed nothing', text)
+                self.assertEqual(self.git_in(self.anna, 'rev-parse', 'HEAD'), before)
+                self.assertEqual(self.git_in(self.anna, 'diff', '--cached', '--name-only').count('results/'), 0)
+                self.assertEqual(self.git_in(self.base, 'ls-remote', 'github.git', 'main').split()[0], before)
+
+    def test_a_file_name_with_spaces_or_accents_is_still_read_as_inside_results(self):
+        self.add_run(self.anna, 'Anna')
+        (self.anna / 'results' / 'outputs' / 'sample-lean-1' / 'my notes é.md').write_text('x', encoding='utf-8')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 0, text)
+
+    def test_with_nothing_new_it_says_so_and_makes_no_commit(self):
+        before = self.git_in(self.anna, 'rev-parse', 'HEAD')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 0)
+        self.assertIn('Nothing new to share', text)
+        self.assertEqual(self.git_in(self.anna, 'rev-parse', 'HEAD'), before)
+
+    def test_an_earlier_commit_that_was_not_pushed_is_sent_next_time(self):
+        self.add_run(self.anna, 'Anna')
+        self.git_in(self.anna, 'add', 'results')
+        self.git_in(self.anna, 'commit', '-m', 'Results: Anna, sample-lean-1')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 0, text)
+        self.assertIn('earlier saved results', text)
+        self.assertEqual(self.git_in(self.anna, 'rev-parse', 'HEAD'), self.git_in(self.base / 'github.git', 'rev-parse', 'refs/heads/main'))
+
+    def test_two_people_sharing_in_turn_both_get_through(self):
+        self.add_run(self.anna, 'Anna', 'sample-lean-1')
+        self.add_run(self.reid, 'Reid', 'sample-original-1')
+        self.assertEqual(self.share(self.anna)[0], 0)
+        code, text = self.share(self.reid)  # Reid is behind, so this needs the pull with rebase
+        self.assertEqual(code, 0, text)
+        self.git_in(self.anna, 'pull', '--rebase')
+        both = sorted(p.name for p in (self.anna / 'results').glob('*.csv'))
+        self.assertEqual(both, ['anna.csv', 'reid.csv'])
+
+    def test_a_rebase_that_fails_is_aborted_and_explained(self):
+        self.add_run(self.anna, 'Anna', 'sample-lean-1')
+        self.add_run(self.reid, 'Reid', 'sample-lean-1', extra={})
+        (self.reid / 'results' / 'outputs' / 'sample-lean-1' / 'summary.md').write_text('reid\'s version', encoding='utf-8')
+        (self.anna / 'results' / 'outputs' / 'sample-lean-1' / 'summary.md').write_text('anna\'s version', encoding='utf-8')
+        self.assertEqual(self.share(self.anna)[0], 0)
+        code, text = self.share(self.reid)  # the same run name in both places: a conflict
+        self.assertEqual(code, 2)
+        self.assertIn('did not work', text)
+        self.assertIn('nothing was lost', text)
+        self.assertEqual(self.git_in(self.reid, 'status', '--porcelain'), '')
+        self.assertFalse((self.reid / '.git' / 'rebase-merge').exists() or (self.reid / '.git' / 'rebase-apply').exists())
+        self.assertEqual(self.git_in(self.reid, 'log', '-1', '--format=%s'), 'Results: Reid, sample-lean-1')  # saved locally
+
+    def test_without_a_first_name_or_without_a_branch_on_github_it_stops_in_plain_words(self):
+        (self.anna / 'local-settings.json').unlink()
+        self.add_run(self.anna, 'Anna')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 2)
+        self.assertIn('do not know your first name', text)
+        (self.anna / 'local-settings.json').write_text(json.dumps({'who': 'Anna'}), encoding='utf-8')
+        self.git_in(self.anna, 'branch', '--unset-upstream')
+        code, text = self.share(self.anna)
+        self.assertEqual(code, 2)
+        self.assertIn('not linked to a branch on GitHub', text)
+        self.assertEqual(self.git_in(self.anna, 'log', '-1', '--format=%s'), 'start')  # nothing was committed
+
+    def test_a_session_log_dropped_into_results_is_never_committed(self):
+        self.add_run(self.anna, 'Anna')
+        (self.anna / 'results' / 'outputs' / 'sample-lean-1' / 'session.jsonl').write_text('{}', encoding='utf-8')
+        (self.anna / '.gitignore').write_text('local-settings.json\n*.jsonl\n', encoding='utf-8')
+        self.git_in(self.anna, 'commit', '-am', 'ignore logs')
+        self.git_in(self.anna, 'push')
+        self.assertEqual(self.share(self.anna)[0], 0)
+        self.assertNotIn('session.jsonl', self.git_in(self.anna, 'ls-files', 'results'))
+
+
+class MigrateTest(KitCase):
+    def make_old_folder(self, finished=True):
+        """An old runs folder as the kit used to leave it: run folders, receipts next to them, results.csv, details."""
+        old = self.home / kit.LEGACY_RUNS_NAME
+        folder = old / 'sample-lean-1'
+        shutil.copytree(str(REPO_SAMPLE / 'start'), str(folder))
+        (folder / 'summary.md').write_text('one paragraph', encoding='utf-8')
+        (old / 'sample-lean-1.receipt.html').write_text('<html>receipt</html>', encoding='utf-8')
+        columns = [c for c in kit.CSV_COLUMNS if c != 'effort']  # an older file, from before the effort column
+        with open(str(old / 'results.csv'), 'w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns)
+            writer.writeheader()
+            writer.writerow({c: '' for c in columns} | {'practice': 'yes', 'task': 'sample', 'version': 'lean', 'run': '1',
+                                                         'who': 'Adit', 'total_usd_api_equivalent': '0.138709'})
+        (old / kit.DETAILS_DIR).mkdir()
+        record = {'name': 'sample-lean-1', 'task': 'sample', 'version': 'lean', 'run': 1, 'who': 'Adit',
+                  'started': '2026-11-12T03:47:40-05:00', 'finished': '2026-11-12T04:02:07-05:00' if finished else None,
+                  'practice': True, 'folder': str(folder), 'prompt': 'p', 'total_usd': 0.138709, 'check_this': False,
+                  'check_reasons': []}
+        (old / kit.DETAILS_DIR / 'sample-lean-1.json').write_text(json.dumps(record), encoding='utf-8')
+        return old
+
+    def test_a_finished_run_moves_into_results_and_the_old_folder_is_renamed_to_scratch(self):
+        old = self.make_old_folder()
+        code, text = self.say('migrate')
+        self.assertEqual(code, 0, text)
+        self.assertIn('Copied 1 run into', text)
+        self.assertEqual(self.results('adit')[0]['total_usd_api_equivalent'], '0.138709')
+        self.assertEqual(list(self.results('adit')[0]), list(kit.CSV_COLUMNS))  # the missing column was filled in
+        self.assertEqual((self.results_dir / kit.RECEIPTS_DIR / 'sample-lean-1.receipt.html').read_text(encoding='utf-8'),
+                         '<html>receipt</html>')
+        self.assertEqual(sorted(p.name for p in (self.results_dir / kit.OUTPUTS_DIR / 'sample-lean-1').iterdir()), ['summary.md'])
+        public = json.loads((self.results_dir / kit.DETAILS_DIR / 'sample-lean-1.json').read_text(encoding='utf-8'))
+        self.assertNotIn('folder', public)
+        self.assertFalse(old.exists())
+        self.assertTrue((self.runs / 'sample-lean-1' / 'summary.md').is_file())  # nothing was deleted
+        self.assertIn('Renamed', text)
+        self.assertIn('I deleted nothing', text)
+        _, listing = self.say('runs')
+        self.assertIn('ok (practice)', listing)
+
+    def test_running_it_twice_changes_nothing_the_second_time(self):
+        self.make_old_folder()
+        self.say('migrate')
+        before = (self.results_dir / 'adit.csv').read_bytes()
+        code, text = self.say('migrate')
+        self.assertEqual(code, 2)
+        self.assertIn('nothing to move', text)
+        self.assertEqual((self.results_dir / 'adit.csv').read_bytes(), before)
+
+    def test_an_unfinished_run_stops_the_rename_and_is_named(self):
+        old = self.make_old_folder(finished=False)
+        code, text = self.say('migrate')
+        self.assertEqual(code, 0, text)
+        self.assertIn('Copied 0 runs', text)
+        self.assertIn('Not finished, so I left the old folder where it is: sample-lean-1.', text)
+        self.assertTrue(old.is_dir())
+        self.assertFalse(self.runs.exists())
+
+    def test_an_empty_scratch_folder_made_by_check_does_not_block_the_rename(self):
+        old = self.make_old_folder()
+        self.runs.mkdir()
+        self.assertEqual(self.say('migrate')[0], 0)
+        self.assertFalse(old.exists())
+        self.assertTrue((self.runs / 'sample-lean-1').is_dir())
+
+    def test_a_scratch_folder_that_already_has_files_is_never_replaced(self):
+        old = self.make_old_folder()
+        self.runs.mkdir()
+        (self.runs / 'keep.txt').write_text('mine', encoding='utf-8')
+        code, text = self.say('migrate')
+        self.assertEqual(code, 0, text)
+        self.assertTrue(old.is_dir())
+        self.assertEqual((self.runs / 'keep.txt').read_text(encoding='utf-8'), 'mine')
+        self.assertIn('already holds files', text)
+
+    def test_with_no_old_folder_it_says_so(self):
+        code, text = self.say('migrate')
+        self.assertEqual(code, 2)
+        self.assertIn('found no old runs folder', text)
 
 
 # ---------------------------------------------------------------- Windows paths
@@ -763,7 +1197,7 @@ class WindowsPathTest(KitCase):
         self.assertEqual(est['session']['cwd'], WINDOWS_CWD)
         self.assertEqual([row['path'] for row in est['files'] if 'app.py' in row['path']], [WINDOWS_CWD + '\\src\\app.py'])
         self.assertEqual(receipt.display_path(WINDOWS_CWD + '\\src\\app.py', WINDOWS_CWD), 'src\\app.py')
-        self.assertEqual(receipt.display_path('c:\\users\\anna\\prompt-analyzer-runs\\sample-lean-1\\a.txt', WINDOWS_CWD), 'a.txt')
+        self.assertEqual(receipt.display_path('c:\\users\\anna\\prompt-analyzer-scratch\\sample-lean-1\\a.txt', WINDOWS_CWD), 'a.txt')
         self.assertIn('app.py', receipt.render(est))
 
     def test_path_helpers(self):

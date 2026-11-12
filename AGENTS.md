@@ -14,9 +14,18 @@ starting any task.
 
 - Never copy prompt text, file contents, or tool output from a session log into this repo,
   a commit message, or a doc. Structure, field names, counts, and token numbers only.
-- Never commit anything under `samples/`, `runs/`, or `reports/`.
+- Never commit anything under `samples/`, `runs/`, or `reports/`. They stay local.
 - Never send log content to a network service.
 - Never modify or delete anything under `~/.claude` or any other agent's log folder. Read only.
+
+## results/ is committed
+
+`results/` holds the experiment runs: `<who>.csv` (one file per person), `receipts/`, `outputs/<run>/`
+(what the agent made), and `run-details/`. It holds runs on made-up inputs only, numbers and outputs,
+never session logs and never anything from a real project. The kit fills it (`finish`) and sends it
+(`share`). The run working folder, `prompt-analyzer-scratch` in the home folder, stays OUTSIDE the repo,
+because Claude Code loads instruction files from parent folders and a run inside the repo would load
+these rules and inflate its cost.
 
 ## Ask me first
 

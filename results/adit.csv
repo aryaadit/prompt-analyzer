@@ -1,0 +1,3 @@
+practice,task,version,run,who,model,effort,date,minutes,model_calls,tool_calls,tool_errors,input_tokens,cache_read_tokens,cache_write_5m_tokens,cache_write_1h_tokens,output_tokens,total_usd_api_equivalent,cache_rebuilds,compacted,check_this,check_reasons,session_id
+yes,sample,lean,1,Adit,claude-sonnet-5-5,,2026-11-12,0.1,3,3,0,6,135969,0,29820,582,0.138709,0,no,no,,d3decdd6-5556-4011-82eb-4d23d0a08e02
+yes,sample,original,1,Adit,claude-sonnet-5-5,high,2026-11-12,0.1,3,3,0,6,137624,0,29840,633,0.139464,0,no,no,,a4beb26d-1f25-4f56-9d21-fe933477d3c8

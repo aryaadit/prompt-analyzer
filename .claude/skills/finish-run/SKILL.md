@@ -9,7 +9,9 @@ allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m s
 
 1. Run `python3 -m src.kit finish`. If the user named a particular run folder (for example `sample-lean-1`),
    run `python3 -m src.kit finish <that name>` instead.
-2. Show everything it prints, in order, without changing the wording or the numbers.
+2. Show everything it prints, in order, without changing the wording or the numbers. That includes the lines about
+   outputs (and any file it skipped for being over 5 MB), where the results went, and the last step: "share my
+   results". Do not share for the user unless they say so.
 3. If the first line starts with "Check this run", say plainly that this run is flagged, repeat the reasons
    from that line, and tell the user to mention it to Anna or Adit. Do not start the run again yourself.
 4. If the kit says it found no session, or more than one, relay that and stop. Do not pick one.
