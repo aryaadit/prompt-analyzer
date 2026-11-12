@@ -56,7 +56,7 @@ Every page has three layers, in this order.
 
 ## Charts
 
-- Library: Apache ECharts, one pinned version, inlined into the page. See below.
+- Library: Apache ECharts, one pinned version, inlined into the page (a receipt in results/receipts/ links it from vendor/). See below.
 - SVG renderer, so charts stay sharp in print and PDF.
 - Every chart has a title that is a statement ("Prompt size grew 5x over the session"),
   axis labels with units, and a tooltip with the exact numbers and badges.
@@ -65,8 +65,9 @@ Every page has three layers, in this order.
 
 ## Behavior
 
-- One self-contained HTML file. Works offline by double-click in Chrome, Safari, and Edge.
-  No network requests at all.
+- One HTML file that works offline by double-click in Chrome, Safari, and Edge. It is self-contained, except a
+  receipt saved in results/receipts/, which loads vendor/echarts.min.js from the repo (see below). No network
+  requests at all.
 - Print and PDF keep colors, keep charts, and never split a card or table row across pages.
   Collapsed sections expand for print.
 - Works at 1,000 rows: show the top 50, with "show all".
@@ -80,4 +81,9 @@ Every page has three layers, in this order.
   license text in vendor/README.md.
 - The page builder reads that file and inlines it into each page. Pages never load it from
   the network.
+- Exception: a receipt saved in results/receipts/ is built in "linked" mode. It loads
+  ../../vendor/echarts.min.js from disk (the same checked file), so a committed receipt is about 50 KB
+  instead of 1.1 MB. If the file is not there, each chart says so in words and the numbers still show.
+  `python3 -m src.kit receipt <run> --export` writes a self-contained copy (library inlined) to the
+  scratch folder, for sharing outside the repo. docs/demo-receipt.html and reports/ stay inlined.
 - Approved by Adit on November 12, 2026. No other front-end dependency without approval.

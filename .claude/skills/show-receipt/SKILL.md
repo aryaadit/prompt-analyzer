@@ -1,23 +1,29 @@
 ---
 name: show-receipt
-description: Opens the receipt page for an experiment run in the browser. Use when the user wants to see the receipt of the last finished run or of a named run.
-when_to_use: The user says things like "show me the receipt", "show the receipt for the last run", "open the receipt", or "show the receipt for sample-lean-1".
+description: Opens the receipt page for an experiment run in the browser, or makes a standalone copy of it to share outside the project. Use when the user wants to see the receipt of the last finished run or of a named run, or to export one.
+when_to_use: The user says things like "show me the receipt", "show the receipt for the last run", "open the receipt", or "show the receipt for sample-lean-1-anna", or, for a copy to share, "export the receipt", "export my receipt", or "make a standalone receipt".
 allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m src.kit *)
 ---
 
 # Show the receipt
 
-Run `python3 -m src.kit receipt latest`. If the user named a run folder (for example `sample-lean-1`), run
+Run `python3 -m src.kit receipt latest`. If the user named a run folder (for example `sample-lean-1-anna`), run
 `python3 -m src.kit receipt <that name>` instead. "Last run" and "latest" mean the latest finished run.
 
 Show what it prints, in order, without changing the wording. It opens the receipt in the browser; if it says
 it could not, give the user the file path it printed.
 
+**Export.** If the user wants a copy to send to someone or to open outside the project (they say "export", "a
+standalone copy", "a copy I can email"), add `--export`: `python3 -m src.kit receipt latest --export` (or with the
+run folder name). The receipt in the project loads its charts from the project's vendor folder, so it only shows
+them when opened from inside the project. The export has the charts inside it and works anywhere. It is written
+outside the project and is not committed. Give the user the path it printed.
+
 
 ## Rules for every command
 
 - **Only from the prompt-analyzer window.** If there is no `src/kit.py` in the current folder, or the
-  folder name looks like a run (for example `sample-lean-1`), say exactly: "Go back to the
+  folder name looks like a run (for example `sample-lean-1-anna`), say exactly: "Go back to the
   prompt-analyzer window to do this, so the run stays clean." Then stop.
 - **Python command name.** Run `python3 -m src.kit ...`. If the machine says the command is not found or
   not recognized (or opens the Microsoft Store), run the same thing with `python` and then with `py`.

@@ -3,12 +3,11 @@
     python3 -m src.kit check
     python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]
     python3 -m src.kit finish [<run folder name>]
-    python3 -m src.kit receipt [latest | <run folder name>]
+    python3 -m src.kit receipt [latest | <run folder name>] [--export]
     python3 -m src.kit prompt [latest | <run folder name>]
     python3 -m src.kit runs
     python3 -m src.kit share
     python3 -m src.kit update
-    python3 -m src.kit migrate [<old runs folder>]
 
 Everything printed is plain words. A problem says what happened and what to do next, in a
 sentence or two, never a stack trace.
@@ -19,6 +18,9 @@ parent folders, and a run inside this repo would carry this project's rules and 
 Everything else lives in results/ in the repo, which is committed: results/<who>.csv (one file
 per person), results/receipts/, results/outputs/<run>/ (what the agent made), and
 results/run-details/<run>.json. results/ holds made-up task inputs only, never session logs.
+A run is named <task>-<version>-<n>-<who>, for example sample-lean-1-anna (who in lower case), so two people can
+never take the same name. A receipt in results/receipts/ loads the chart library from ../../vendor/; the receipt
+command with --export makes a self-contained copy for sharing outside the repo.
 Works on Mac and Windows: paths are pathlib, and nothing assumes the Python command is called python3.
 """
 import argparse
@@ -35,12 +37,12 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import estimate, fmt, parse, paths, receipt, summarize
+from . import estimate, fmt, page as pagelib, parse, paths, receipt, summarize
 
 REPO = Path(__file__).resolve().parent.parent
 SETTINGS_NAME = 'local-settings.json'  # gitignored; holds scratch_folder and who
 DEFAULT_SCRATCH_NAME = 'prompt-analyzer-scratch'
-LEGACY_RUNS_NAME = 'prompt-analyzer-runs'  # the old name of the scratch folder; only `migrate` reads it
+EXPORTS_DIR = 'exports'  # inside the scratch folder: standalone copies of receipts, never committed
 RESULTS_DIR = 'results'  # inside the repo, committed
 RECEIPTS_DIR, OUTPUTS_DIR = 'receipts', 'outputs'
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024  # a file the agent made that is bigger than this is not copied
@@ -52,7 +54,7 @@ LONG_AGO = datetime(1970, 1, 1, tzinfo=timezone.utc)
 JUNK_FILES = ('.DS_Store', '.gitkeep', 'Thumbs.db')
 _SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 _WHO = re.compile(r'^[A-Za-z]+$')
-_RUN_NAME = re.compile(r'^(?P<task>[a-z0-9][a-z0-9-]*)-(?P<version>original|lean)-(?P<run>\d+)$')
+_RUN_NAME = re.compile(r'^(?P<task>[a-z0-9][a-z0-9-]*)-(?P<version>original|lean)-(?P<run>\d+)-(?P<who>[a-z]+)$')
 GO_BACK = 'Go back to the prompt-analyzer window to do this, so the run stays clean.'
 CSV_COLUMNS = (
     'practice', 'task', 'version', 'run', 'who', 'model', 'effort', 'date', 'minutes', 'model_calls', 'tool_calls', 'tool_errors',
@@ -243,9 +245,9 @@ def task_answers(task_dir):
     return out
 
 
-def run_name(task, version, number):
-    """The folder name of one run."""
-    return '%s-%s-%d' % (task, version, number)
+def run_name(task, version, number, who):
+    """The folder name of one run: task, version, number, and the person (lower case)."""
+    return '%s-%s-%d-%s' % (task, version, number, who.lower())
 
 
 def _read_details_in(base):
@@ -306,16 +308,16 @@ def used_names(env):
     scratch = scratch_folder(env)
     names = {p.name for p in scratch.iterdir()} if scratch.is_dir() else set()
     names |= {d['name'] for d in read_all_details(env)}
-    names |= {'%s-%s-%s' % (r['task'], r['version'], r['run']) for r in read_all_rows(env)}
+    names |= {'%s-%s-%s-%s' % (r['task'], r['version'], r['run'], r.get('who', '').lower()) for r in read_all_rows(env)}
     return names
 
 
-def next_run_number(env, task, version):
-    """The next free run number for a task and version (folders, details files, and results all count)."""
+def next_run_number(env, task, version, who):
+    """The next free run number for a task, version, and person (folders, details files, and results all count)."""
     used = set()
     for name in used_names(env):
         match = _RUN_NAME.match(name)
-        if match and match.group('task') == task and match.group('version') == version:
+        if match and (match.group('task'), match.group('version'), match.group('who')) == (task, version, who.lower()):
             used.add(int(match.group('run')))
     return max(used, default=0) + 1
 
@@ -342,14 +344,14 @@ def start_run(env, task, version, run=None, who=None):
     if not _WHO.match(who):
         raise KitError('Your first name must be letters only, with no spaces, for example: --who Anna.')
     scratch = scratch_folder(env)
-    number = run if run is not None else next_run_number(env, task, version)
+    number = run if run is not None else next_run_number(env, task, version, who)
     if number < 1:
         raise KitError('The run number must be 1 or higher.')
-    name = run_name(task, version, number)
+    name = run_name(task, version, number, who)
     if name in used_names(env):
         raise KitError('The run %s already exists, so I did not touch it. Never reuse a run folder: it still '
                        'holds the earlier run. Start again without --run to use the next free number, which is %d.'
-                       % (name, next_run_number(env, task, version)))
+                       % (name, next_run_number(env, task, version, who)))
     prompt = (task_dir / ('prompt-%s.md' % version)).read_text(encoding='utf-8').rstrip('\r\n')
     _copy_start_files(task_dir / 'start', scratch / name)
     details = {'name': name, 'task': task, 'version': version, 'run': number, 'who': who,
@@ -554,7 +556,7 @@ def _build_receipt(env, details):
         raise KitError('I could not build the receipt: %s. Tell Adit.' % error)
     page = receipt_path(env, details['name'])
     page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text(receipt.render(est), encoding='utf-8')
+    page.write_text(receipt.render(est, library='linked'), encoding='utf-8')  # the library is read from vendor/
     return session, est, page
 
 
@@ -621,37 +623,18 @@ def _largest_cause(est):
 
 def pick_unfinished(env):
     """The most recently started run of this laptop that is not finished, or a plain error."""
-    done = {(d['name'], str(d.get('who', '')).lower()) for d in _read_details_in(env.results)}
-    open_runs = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished')
-                 and (d['name'], str(d.get('who', '')).lower()) not in done]
+    done = {d['name'] for d in _read_details_in(env.results)}
+    open_runs = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished') and d['name'] not in done]
     open_runs.sort(key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
     if not open_runs:
         raise KitError('There is no unfinished run. Say "show the runs" to see them, or "start a run" to begin one.')
     return open_runs[-1]
 
 
-def own_run(env, name):
-    """The details of a run started on this laptop (the scratch record), else any run of that name."""
-    for details in _read_details_in(scratch_folder(env)):
-        if details['name'] == name:
-            return details
-    return find_run(env, name)
-
-
-def check_name_is_free(env, details):
-    """A run name in results/ that belongs to someone else must never be overwritten."""
-    found = [d for d in _read_details_in(env.results) if d['name'] == details['name']]
-    if found and str(found[0].get('who', '')).lower() != str(details['who']).lower():
-        raise KitError('The run %s is already in the shared results and belongs to %s, so I stopped and changed '
-                       'nothing. Say "update the tool" to get their results, then start a new run so it gets a '
-                       'free number. Tell Adit.' % (details['name'], found[0].get('who')))
-
-
 def command_finish(env, args, out):
     """kit finish: build the receipt, copy what the run made, record the row, flag anything odd, print the result."""
     scratch = scratch_folder(env)
-    details = own_run(env, args.run_name) if args.run_name else pick_unfinished(env)
-    check_name_is_free(env, details)
+    details = find_run(env, args.run_name) if args.run_name else pick_unfinished(env)
     session, est, page = _build_receipt(env, details)
     reasons = session_flags(session, est, reference_run(env, details))
     row = build_result(details, session, est, reasons)
@@ -684,6 +667,18 @@ def command_finish(env, args, out):
 
 # ---------------------------------------------------------------- receipt, runs, update
 
+def export_receipt(env, name, page):
+    """Write a standalone copy of a receipt (the chart library inside it) to exports/ in the scratch folder, which is
+    outside the repo, and return its path."""
+    target = scratch_folder(env) / EXPORTS_DIR / (name + '.receipt.html')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.write_text(pagelib.standalone(page.read_text(encoding='utf-8')), encoding='utf-8')
+    except pagelib.PageError as error:
+        raise KitError('I could not make a standalone copy: %s. Tell Adit.' % error)
+    return target
+
+
 def command_receipt(env, args, out):
     """kit receipt: open the receipt for a run, building it if needed."""
     if args.run_name in (None, 'latest'):
@@ -696,9 +691,16 @@ def command_receipt(env, args, out):
     page = receipt_path(env, details['name'])
     if not page.is_file():
         _, _, page = _build_receipt(env, details)
+    if args.export:
+        page = export_receipt(env, details['name'], page)
     if not args.no_open and not open_in_browser(page):
         print('I could not open the receipt in a browser. Open this file yourself.', file=out)
-    print('Receipt: %s' % page, file=out)
+    if args.export:
+        print('Standalone receipt: %s' % page, file=out)
+        print('This copy has the charts inside it, so it works anywhere, even when sent by email. It is outside the '
+              'project and is not committed.', file=out)
+    else:
+        print('Receipt: %s' % page, file=out)
     return 0
 
 
@@ -757,9 +759,8 @@ def command_runs(env, args, out):
     """kit runs: list the runs so far. Finished runs of everyone come from every results/<who>.csv; runs
     started on this laptop and not finished come from the scratch folder."""
     rows = read_all_rows(env)
-    finished = {('%s-%s-%s' % (r['task'], r['version'], r['run']), r.get('who', '').lower()) for r in rows}
-    waiting = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished')
-               and (d['name'], str(d.get('who', '')).lower()) not in finished]
+    finished = {'%s-%s-%s-%s' % (r['task'], r['version'], r['run'], r.get('who', '').lower()) for r in rows}
+    waiting = [d for d in _read_details_in(scratch_folder(env)) if not d.get('finished') and d['name'] not in finished]
     waiting.sort(key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO)
     if not rows and not waiting:
         print('No runs yet. To begin one, say "start a run".', file=out)
@@ -771,7 +772,8 @@ def command_runs(env, args, out):
         table.append((r['task'], r['version'], r['run'], r.get('who', ''), _dollars(r.get('total_usd_api_equivalent')),
                       flag + (' (practice)' if r.get('practice') == 'yes' else '')))
         if r.get('check_this') == 'yes':
-            notes.append('%s-%s-%s: %s.' % (r['task'], r['version'], r['run'], r.get('check_reasons', '')))
+            notes.append('%s-%s-%s-%s: %s.' % (r['task'], r['version'], r['run'], r.get('who', '').lower(),
+                                               r.get('check_reasons', '')))
     for d in waiting:
         table.append((d['task'], d['version'], d['run'], d['who'], '-',
                       'not finished' + (' (practice)' if d.get('practice') else '')))
@@ -800,7 +802,7 @@ def command_update(env, args, out):
     return 0
 
 
-# ---------------------------------------------------------------- share and migrate
+# ---------------------------------------------------------------- share
 
 def _git_lines(env, *args):
     """The lines git printed for a command, or None when git is missing or the command failed."""
@@ -864,70 +866,6 @@ def command_share(env, args, out):
           file=out)
     if staged:
         print('%d file%s from results/ sent to GitHub.' % (len(staged), '' if len(staged) == 1 else 's'), file=out)
-    return 0
-
-
-def _move_one_run(env, old, details, rows):
-    """Copy one finished run from the old runs folder into results/. Returns a list of plain notes."""
-    name, notes = details['name'], []
-    row = rows.get((details['task'], details['version'], str(details['run'])))
-    if not row or not _WHO.match(str(details.get('who', ''))):
-        return ['%s has no results row or no valid first name, so I left it out.' % name]
-    page = old / (name + '.receipt.html')
-    if page.is_file():
-        receipt_path(env, name).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(page), str(receipt_path(env, name)))
-    else:
-        notes.append('%s has no receipt page to copy.' % name)
-    if (old / name).is_dir():
-        _, more = copy_outputs(env, details, old / name)
-        notes += more
-    else:
-        notes.append('%s has no run folder, so no outputs were copied.' % name)
-    upsert_result(env, {c: row.get(c, '') for c in CSV_COLUMNS})
-    write_details(env.results, public_details(details))
-    return notes
-
-
-def command_migrate(env, args, out):
-    """kit migrate: copy the finished runs of the old runs folder into results/, then rename that folder to the
-    scratch folder when nothing in it is still running. Deletes nothing."""
-    old = Path(args.folder).expanduser() if args.folder else env.home / LEGACY_RUNS_NAME
-    scratch = scratch_folder(env)
-    if not old.is_dir():
-        raise KitError('I found no old runs folder at %s, so there is nothing to move.' % old)
-    if old.resolve() == scratch.resolve():
-        raise KitError('%s is already the scratch folder, so there is nothing to move.' % old)
-    rows = {}
-    if (old / 'results.csv').is_file():
-        with open(str(old / 'results.csv'), newline='', encoding='utf-8') as handle:
-            rows = {(r.get('task'), r.get('version'), r.get('run')): r for r in csv.DictReader(handle)}
-    already = {d['name'] for d in _read_details_in(env.results)}
-    moved, notes, waiting = [], [], []
-    for details in sorted(_read_details_in(old), key=lambda d: estimate.parse_time(d.get('started')) or LONG_AGO):
-        if not details.get('finished'):
-            waiting.append(details['name'])
-        elif details['name'] in already:
-            notes.append('%s is already in results/, so I left it alone.' % details['name'])
-        else:
-            more = _move_one_run(env, old, details, rows)
-            notes += more
-            if (env.results / DETAILS_DIR / (details['name'] + '.json')).is_file():
-                moved.append(details['name'])
-    print('Copied %d run%s into %s%s' % (len(moved), '' if len(moved) == 1 else 's', env.results,
-                                         (': ' + ', '.join(moved)) if moved else '.'), file=out)
-    for note in notes:
-        print(note, file=out)
-    if waiting:
-        print('Not finished, so I left the old folder where it is: %s.' % ', '.join(waiting), file=out)
-    elif scratch.is_dir() and not any(scratch.iterdir()):
-        scratch.rmdir()  # an empty folder the kit made itself, so the rename can go ahead
-    if not waiting and not scratch.exists():
-        old.rename(scratch)
-        print('Renamed %s to %s. I deleted nothing.' % (old, scratch), file=out)
-    elif not waiting:
-        print('%s already holds files, so I left %s as it is. I deleted nothing. It can be cleared once you have '
-              'checked results/.' % (scratch, old), file=out)
     return 0
 
 
@@ -1039,7 +977,7 @@ class PlainParser(argparse.ArgumentParser):
 
 
 def make_parser():
-    """The command line: check, start, finish, receipt, prompt, runs, share, update, migrate."""
+    """The command line: check, start, finish, receipt, prompt, runs, share, update."""
     parser = PlainParser(prog='python3 -m src.kit', description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True, parser_class=PlainParser)
     commands.add_parser('check', help='check that everything is ready')
@@ -1054,19 +992,18 @@ def make_parser():
     show = commands.add_parser('receipt', help='open a receipt')
     show.add_argument('run_name', nargs='?')
     show.add_argument('--no-open', action='store_true')
+    show.add_argument('--export', action='store_true', help='make a standalone copy to share outside the project')
     again = commands.add_parser('prompt', help='show a run\'s prompt again')
     again.add_argument('run_name', nargs='?')
     commands.add_parser('runs', help='list the runs')
     commands.add_parser('share', help='send your results to the group')
     commands.add_parser('update', help='get the latest version of the tool')
-    move = commands.add_parser('migrate', help='move the runs of the old runs folder into results/')
-    move.add_argument('folder', nargs='?')
     return parser
 
 
 COMMANDS = {'check': command_check, 'start': command_start, 'finish': command_finish,
             'receipt': command_receipt, 'prompt': command_prompt, 'runs': command_runs, 'share': command_share,
-            'update': command_update, 'migrate': command_migrate}
+            'update': command_update}
 
 
 def inside_scratch_folder(env, cwd):

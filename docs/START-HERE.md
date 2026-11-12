@@ -67,7 +67,8 @@ Do these in order. Do not skip any.
     It sends your results folder to the group (and nothing else). If it says files outside the results folder
     are changed, nothing was sent: text Adit.
 
-Everything the blind vote needs is now in results/outputs/ (what the agent made), results/receipts/, and
+Runs are named task, version, number, and your first name, for example sample-lean-1-anna. Everything the blind
+vote needs is now in results/outputs/ (what the agent made), results/receipts/, and
 results/run-details/, all inside the project. The scratch folder is only a work area. Once you have shared,
 you can clear it; the tool never deletes it for you.
 
@@ -81,7 +82,8 @@ Type these in the Claude Code chat panel of the prompt-analyzer window. Your own
 | start a run | Makes a fresh run folder, copies the prompt, opens the folder in a new window |
 | start run: sample, lean | The same, with the task and version given |
 | finish my run | Finds the session, builds the receipt, copies what the agent made, saves the numbers in results/ |
-| show me the receipt | Opens the receipt of the last finished run |
+| show me the receipt | Opens the receipt of the last finished run. It shows its charts when opened from inside the project |
+| export my receipt | Makes a standalone copy of the receipt to send to someone or open anywhere |
 | show me the prompt again | Puts the prompt of your latest run back on the clipboard and prints it |
 | show the runs | Lists every run so far, from everyone's results files: task, version, run, who, dollars, flag |
 | share my results | Sends your results folder to the group. It sends nothing else, and stops if anything else is changed |

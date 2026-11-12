@@ -18,7 +18,7 @@ a successful update, suggest "check my setup".
 ## Rules for every command
 
 - **Only from the prompt-analyzer window.** If there is no `src/kit.py` in the current folder, or the
-  folder name looks like a run (for example `sample-lean-1`), say exactly: "Go back to the
+  folder name looks like a run (for example `sample-lean-1-anna`), say exactly: "Go back to the
   prompt-analyzer window to do this, so the run stays clean." Then stop.
 - **Python command name.** Run `python3 -m src.kit ...`. If the machine says the command is not found or
   not recognized (or opens the Microsoft Store), run the same thing with `python` and then with `py`.

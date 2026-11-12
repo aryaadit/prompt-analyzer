@@ -32,7 +32,7 @@ The page follows docs/DESIGN.md, in three layers. Nothing was dropped when the p
 One colour per meaning, set once in `src/page.py`: 13 hues and 2 greys, picked so every pair stays at least 15 apart (CIE Lab) under
 normal vision and protan, deutan, and tritan simulation. Blue is re-sent, red-orange is new, indigo is output, ochre is subagent
 work, and the twelve kinds of work keep their own colours. Colour is never the only cue. A true zero is "$0.00" and nothing else is:
-anything under a cent reads "<$0.01" (or "<$0.0001" in the four-decimal tables). The chart library is Apache ECharts, inlined from
+anything under a cent reads "<$0.01" (or "<$0.0001" in the four-decimal tables). The chart library is Apache ECharts, inlined (or, in a receipt kept in results/receipts/, linked) from
 `vendor/echarts.min.js` and checked against the SHA-256 in `vendor/README.md` on every build. A page makes no network request.
 
 ## What is exact

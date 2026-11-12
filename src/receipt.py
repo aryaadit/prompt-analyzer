@@ -8,7 +8,8 @@ The page follows docs/DESIGN.md and is built from src/page.py. Three layers: the
 money went), the explanation (the costliest steps, how the conversation grew, how the cost piled up), and the
 evidence (every step, every file, the findings, how to read the page, the fine print), collapsed until opened.
 
-It loads nothing from the network and works offline by double-click. Apache ECharts is inlined from vendor/.
+It loads nothing from the network and works offline by double-click. Apache ECharts is inlined from vendor/, or, for
+a receipt kept in results/receipts/, linked as ../../vendor/echarts.min.js (see page.py).
 Every string that came from a log is HTML-escaped. The page holds no prompt text, no file contents, and no tool output.
 """
 import argparse
@@ -776,9 +777,9 @@ if(more){more.addEventListener('click',function(){$$('#filetable tr.extra').forE
 """
 
 
-def render(est):
-    """The whole page as one string."""
-    pg = Page()
+def render(est, library='inline'):
+    """The whole page as one string. library is "inline" (self-contained) or "linked" (for results/receipts/)."""
+    pg = Page(library)
     title = 'Receipt: %s, %s' % (est['session']['project'], when(est['session']['started']))
     body = ''.join([_top(est, pg), _headline(est, pg), _tiles(est, pg), _where(est, pg), _cards(est, pg), _growth(est, pg),
                     _running(est, pg), _steps(est, pg), _files(est, pg), _findings(est), _how_to_read(pg), _fine_print(est, pg)])

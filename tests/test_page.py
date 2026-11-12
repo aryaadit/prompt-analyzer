@@ -106,6 +106,66 @@ class NoNetworkTest(PageCase):
         self.assertIn('createObjectURL', page.SHARED_JS)
 
 
+class LinkedLibraryTest(PageCase):
+    """A receipt kept in results/receipts/ loads the library from ../../vendor/ instead of carrying it inside."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.linked = {name: receipt.render(est, library='linked') for name, (est, _) in cls.pages.items()}
+
+    def test_a_linked_page_points_at_the_vendored_file_and_does_not_contain_it(self):
+        library = page.ECHARTS_FILE.read_text(encoding='utf-8')
+        for name, text in self.linked.items():
+            self.assertIn('<script src="../../vendor/echarts.min.js"></script>', text, name)
+            self.assertNotIn(library[:2000], text, name)
+            self.assertLess(len(text), len(self.pages[name][1]) - len(library) + len(page.LINKED_BLOCK), name)
+
+    def test_the_path_really_reaches_the_vendored_file_from_results_receipts(self):
+        here = page.REPO_ROOT / 'results' / 'receipts'
+        self.assertEqual((here / page.LINKED_ECHARTS_PATH).resolve(), page.ECHARTS_FILE.resolve())
+
+    def test_the_only_thing_a_linked_page_points_at_is_that_one_local_file(self):
+        for name, text in self.linked.items():
+            found = re.findall(r'<(\w+)[^>]*?\s(src|href)="([^"]*)"', text)
+            self.assertEqual(found, [('script', 'src', '../../vendor/echarts.min.js')], name)
+            self.assertNotRegex(text, NoNetworkTest.BAD_ATTR, name)
+            self.assertNotRegex(text, r'@import|url\(\s*["\']?(?:https?:)?//', name)
+
+    def test_a_linked_page_says_so_in_words_when_the_library_is_not_there(self):
+        for text in self.linked.values():
+            self.assertIn('window.echarts||', text)
+            self.assertIn(page.NO_CHARTS_NOTE, text)
+        self.assertIn('export option', page.NO_CHARTS_NOTE)
+
+    def test_standalone_gives_back_exactly_the_inline_page(self):
+        for name, text in self.linked.items():
+            self.assertEqual(page.standalone(text), self.pages[name][1], name)
+
+    def test_a_page_that_is_already_standalone_is_unchanged(self):
+        text = self.pages['s3'][1]
+        self.assertEqual(page.standalone(text), text)
+
+    def test_the_default_page_is_still_inline_so_the_demo_receipt_does_not_change(self):
+        for name, (est, text) in self.pages.items():
+            self.assertEqual(receipt.render(est, library='inline'), text, name)
+            self.assertNotIn('src="', text.replace(page.ECHARTS_FILE.read_text(encoding='utf-8'), ''), name)
+
+    def test_an_unknown_library_mode_is_refused(self):
+        with self.assertRaises(page.PageError):
+            page.Page('cdn')
+
+    def test_a_linked_page_is_only_built_against_the_pinned_library(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake = Path(folder) / 'echarts.min.js'
+            fake.write_text('alert(1)', encoding='utf-8')
+            with mock.patch.object(page, 'ECHARTS_FILE', fake):
+                with self.assertRaises(page.PageError):
+                    receipt.render(self.pages['s3'][0], library='linked')
+                with self.assertRaises(page.PageError):
+                    page.standalone(self.linked['s3'])
+
+
 class OneColourPerMeaningTest(PageCase):
     def test_no_two_meanings_share_a_colour(self):
         values = page.palette_values()

@@ -7,7 +7,7 @@ allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m s
 
 # Finish my run
 
-1. Run `python3 -m src.kit finish`. If the user named a particular run folder (for example `sample-lean-1`),
+1. Run `python3 -m src.kit finish`. If the user named a particular run folder (for example `sample-lean-1-anna`),
    run `python3 -m src.kit finish <that name>` instead.
 2. Show everything it prints, in order, without changing the wording or the numbers. That includes the lines about
    outputs (and any file it skipped for being over 5 MB), where the results went, and the last step: "share my
@@ -20,7 +20,7 @@ allowed-tools: Bash(python3 -m src.kit *) Bash(python -m src.kit *) Bash(py -m s
 ## Rules for every command
 
 - **Only from the prompt-analyzer window.** If there is no `src/kit.py` in the current folder, or the
-  folder name looks like a run (for example `sample-lean-1`), say exactly: "Go back to the
+  folder name looks like a run (for example `sample-lean-1-anna`), say exactly: "Go back to the
   prompt-analyzer window to do this, so the run stays clean." Then stop.
 - **Python command name.** Run `python3 -m src.kit ...`. If the machine says the command is not found or
   not recognized (or opens the Microsoft Store), run the same thing with `python` and then with `py`.

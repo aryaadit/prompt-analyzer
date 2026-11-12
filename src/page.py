@@ -2,10 +2,13 @@
 
 The standard is docs/DESIGN.md. This module holds what every page shares: the colours (one colour per meaning,
 set once, here), number formats, the exact and est. badges, hover explanations, collapsible sections, CSV buttons,
-the print styles, and the function that inlines Apache ECharts from vendor/.
+the print styles, and the functions that bring in Apache ECharts from vendor/.
 
-A page is one self-contained HTML file. It makes no network request: the chart library is read from vendor/ and
-placed inside the page. Every string that came from a log must go through esc() before it reaches the page.
+A page is one HTML file that makes no network request. By default the chart library is read from vendor/ and
+placed inside the page, so the file is self-contained (docs/demo-receipt.html, reports/). A receipt kept in
+results/receipts/ is built in "linked" mode instead: it loads ../../vendor/echarts.min.js, which is the same
+file read from disk, so a committed receipt is small. standalone() turns a linked page back into a self-contained
+one for sharing outside the repo. Every string that came from a log must go through esc() before it reaches the page.
 """
 import csv
 import hashlib
@@ -136,7 +139,10 @@ TERMS = {  # key: (the words on the page, the plain explanation)
 class Page:
     """One page being built. It owns the glossary, the chart specs, and the CSV blocks, so the shell can emit them once."""
 
-    def __init__(self):
+    def __init__(self, library='inline'):
+        if library not in ('inline', 'linked'):
+            raise PageError('A page loads the chart library either "inline" or "linked", not "%s".' % library)
+        self.library = library
         self.used_terms = set()
         self.charts = {}
         self.csv = {}
@@ -210,7 +216,8 @@ class Page:
                 '<style>%s</style><noscript><style>%s</style></noscript></head><body><main>%s</main>'
                 '<div id="tip" role="tooltip" hidden></div>%s<script type="application/json" id="page-data">%s</script>'
                 '<script>%s</script></body></html>\n' % (
-                    esc(title), CSS, NOSCRIPT_CSS, body, inline_echarts() + self.csv_blocks(), json_for_html(data),
+                    esc(title), CSS, NOSCRIPT_CSS, body, (inline_echarts() if self.library == 'inline' else linked_echarts()) + self.csv_blocks(),
+                    json_for_html(data),
                     SHARED_JS + page_js))
 
 
@@ -244,15 +251,42 @@ class PageError(Exception):
     """A page cannot be built (for example, the chart library does not match its recorded checksum)."""
 
 
-def inline_echarts():
-    """The chart library as one inline script block. It is checked against the checksum in vendor/README.md."""
+def _checked_library():
+    """The text of vendor/echarts.min.js, after checking it against the checksum in vendor/README.md."""
     raw = ECHARTS_FILE.read_bytes()
     if hashlib.sha256(raw).hexdigest() != vendored_sha256():
         raise PageError('vendor/echarts.min.js does not match the SHA-256 in vendor/README.md')
-    text = raw.decode('utf-8')
+    return raw.decode('utf-8')
+
+
+def inline_echarts():
+    """The chart library as one inline script block. It is checked against the checksum in vendor/README.md."""
+    text = _checked_library()
     if '</script' in text.lower():
         raise PageError('vendor/echarts.min.js contains a script end tag, so it cannot be inlined as it is')
     return '<script>%s</script>' % text
+
+
+# A receipt in results/receipts/ sits two folders below the repo root, so the library is at ../../vendor/.
+LINKED_ECHARTS_PATH = '../../vendor/echarts.min.js'
+NO_CHARTS_NOTE = ('The charts did not load. This page reads them from the vendor folder of the project, so open it from '
+                  'inside the project, or make a standalone copy with the export option.')
+LINKED_BLOCK = ('<script src="%s"></script><script>window.echarts||Array.prototype.forEach.call('
+                'document.querySelectorAll(".chart"),function(e){e.textContent="%s";});</script>'
+                % (LINKED_ECHARTS_PATH, NO_CHARTS_NOTE))
+
+
+def linked_echarts():
+    """The script tags of a linked page. The vendored file is checked now, so a page is only built against the pinned
+    library. If the file is missing when the page is opened, each chart says so in words."""
+    _checked_library()
+    return LINKED_BLOCK
+
+
+def standalone(page_text):
+    """A linked page as a self-contained one: the link is replaced by the checked library. A page that is already
+    self-contained comes back unchanged."""
+    return page_text.replace(LINKED_BLOCK, inline_echarts(), 1)
 
 
 def json_for_html(value):

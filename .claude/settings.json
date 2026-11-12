@@ -10,10 +10,12 @@
       "Bash(git pull)",
       "Bash(git pull --ff-only)",
       "Bash(git fetch)",
-      "Bash(git add results/)",
-      "Bash(git commit -m *)",
-      "Bash(git pull --rebase)",
-      "Bash(git push)"
+      "Bash(python3 -m src.kit share)",
+      "Bash(python -m src.kit share)",
+      "Bash(py -m src.kit share)",
+      "PowerShell(python3 -m src.kit share)",
+      "PowerShell(python -m src.kit share)",
+      "PowerShell(py -m src.kit share)"
     ]
   }
 }
