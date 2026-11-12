@@ -28,7 +28,9 @@ starting any task.
 ## Style
 
 - Python 3, standard library only, unless I approve a dependency.
-- The receipt is one self-contained HTML file. No build step, no external scripts.
+- Every page follows `docs/DESIGN.md`. Read it before building or changing any page.
+- Pages are one self-contained HTML file. No build step and no network requests. The only
+  approved script is Apache ECharts from `vendor/`, inlined into the page.
 - Label every cost number as **exact** (read from the log) or **estimated**.
 - Label every dollar figure as **API-equivalent**. Keep prices in one table with the date checked.
 - Small functions, plain names, a short docstring on each. Tests for the parser.
