@@ -441,6 +441,113 @@ class FinishTest(KitCase):
         self.assertIn('do not know a run called "sample-lean-9"', text)
 
 
+class PromptAgainTest(KitCase):
+    def expected(self, version='lean'):
+        return (REPO_SAMPLE / ('prompt-%s.md' % version)).read_text(encoding='utf-8').rstrip('\r\n')
+
+    def test_the_prompt_is_saved_in_the_details_file_when_the_run_starts(self):
+        self.start('lean')
+        details = json.loads((self.runs / kit.DETAILS_DIR / 'sample-lean-1.json').read_text(encoding='utf-8'))
+        self.assertEqual(details['prompt'], self.expected('lean'))
+
+    def test_the_prompt_is_not_in_the_run_folder_or_the_results_file(self):
+        folder = self.start('lean')
+        self.put_session(folder, SESSION_3)
+        self.say('finish')
+        self.assertNotIn('prompt', ' '.join(p.name for p in folder.iterdir()).lower())
+        text = (self.runs / kit.RESULTS_NAME).read_text(encoding='utf-8')
+        self.assertNotIn(self.expected('lean'), text)
+
+    def test_it_copies_the_latest_runs_prompt_and_prints_it_between_two_lines(self):
+        self.start('original')
+        self.start('lean')
+        self.mocks['clipboard'].reset_mock()
+        code, text = self.say('prompt')
+        self.assertEqual(code, 0, text)
+        self.mocks['clipboard'].assert_called_once_with(self.expected('lean'))
+        self.assertIn('Prompt for sample-lean-1', text)
+        self.assertLess(text.index('START OF PROMPT'), text.index(self.expected('lean')))
+        self.assertLess(text.index(self.expected('lean')), text.index('END OF PROMPT'))
+        self.assertIn('It is on your clipboard.', text)
+
+    def test_a_named_run_gives_that_runs_prompt(self):
+        self.start('original')
+        self.start('lean')
+        self.mocks['clipboard'].reset_mock()
+        code, text = self.say('prompt', 'sample-original-1')
+        self.assertEqual(code, 0, text)
+        self.mocks['clipboard'].assert_called_once_with(self.expected('original'))
+        self.assertIn('sample, original version', text)
+
+    def test_the_saved_prompt_wins_over_a_task_file_edited_later(self):
+        self.start('lean')
+        task_file = self.repo / 'experiments' / 'tasks' / 'sample' / 'prompt-lean.md'
+        task_file.write_text('A different prompt, written later.\n', encoding='utf-8')
+        self.mocks['clipboard'].reset_mock()
+        _, text = self.say('prompt')
+        self.mocks['clipboard'].assert_called_once_with(self.expected_from(REPO_SAMPLE / 'prompt-lean.md'))
+        self.assertNotIn('written later', text)
+
+    def expected_from(self, path):
+        return path.read_text(encoding='utf-8').rstrip('\r\n')
+
+    def test_without_a_clipboard_it_still_prints_and_says_how_to_copy(self):
+        self.start('lean')
+        self.mocks['clipboard'].return_value = False
+        code, text = self.say('prompt')
+        self.assertEqual(code, 0)
+        self.assertIn(self.expected('lean'), text)
+        self.assertIn('I could not reach the clipboard. Copy the prompt from between the two lines above.', text)
+
+    def test_a_run_from_before_prompts_were_saved_uses_the_task_file_and_says_so(self):
+        self.start('lean')
+        path = self.runs / kit.DETAILS_DIR / 'sample-lean-1.json'
+        details = json.loads(path.read_text(encoding='utf-8'))
+        del details['prompt']
+        path.write_text(json.dumps(details), encoding='utf-8')
+        self.mocks['clipboard'].reset_mock()
+        code, text = self.say('prompt')
+        self.assertEqual(code, 0, text)
+        self.mocks['clipboard'].assert_called_once_with(self.expected('lean'))
+        self.assertIn('began before prompts were saved', text)
+
+    def test_with_no_saved_prompt_and_no_task_file_it_is_a_plain_message(self):
+        self.start('lean')
+        path = self.runs / kit.DETAILS_DIR / 'sample-lean-1.json'
+        details = json.loads(path.read_text(encoding='utf-8'))
+        del details['prompt']
+        path.write_text(json.dumps(details), encoding='utf-8')
+        shutil.rmtree(str(self.repo / 'experiments' / 'tasks' / 'sample'))
+        code, text = self.say('prompt')
+        self.assertEqual(code, 2)
+        self.assertIn('cannot show it', text)
+        self.assertNotIn('Traceback', text)
+
+    def test_no_runs_and_unknown_runs_are_plain_messages(self):
+        code, text = self.say('prompt')
+        self.assertEqual(code, 2)
+        self.assertIn('No runs yet', text)
+        self.start('lean')
+        code, text = self.say('prompt', 'sample-lean-9')
+        self.assertEqual(code, 2)
+        self.assertIn('I do not know a run called "sample-lean-9"', text)
+
+    def test_it_is_refused_from_inside_a_run_folder_like_every_other_command(self):
+        folder = self.start('lean')
+        out = io.StringIO()
+        self.assertEqual(kit.main(['prompt'], out=out, env=self.env, cwd=folder), 2)
+        self.assertEqual(out.getvalue().strip(), kit.GO_BACK)
+
+    def test_the_prompt_never_comes_from_a_session_log(self):
+        """Finishing a run (which reads the session) must not change what the command shows."""
+        folder = self.start('lean')
+        self.put_session(folder, SESSION_3)
+        self.say('finish')
+        self.mocks['clipboard'].reset_mock()
+        self.say('prompt')
+        self.mocks['clipboard'].assert_called_once_with(self.expected('lean'))
+
+
 class ReceiptAndRunsTest(KitCase):
     def test_latest_means_the_latest_finished_run_not_the_latest_session(self):
         first, second = self.start('lean'), self.start('original')

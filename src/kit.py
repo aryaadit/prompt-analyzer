@@ -4,6 +4,7 @@
     python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]
     python3 -m src.kit finish [<run folder name>]
     python3 -m src.kit receipt [latest | <run folder name>]
+    python3 -m src.kit prompt [latest | <run folder name>]
     python3 -m src.kit runs
     python3 -m src.kit update
 
@@ -289,7 +290,7 @@ def start_run(env, task, version, run=None, who=None):
     _copy_start_files(task_dir / 'start', runs / name)
     details = {'name': name, 'task': task, 'version': version, 'run': number, 'who': who,
                'started': now_text(), 'finished': None, 'practice': is_practice(task_dir),
-               'folder': str(runs / name)}
+               'folder': str(runs / name), 'prompt': prompt}
     write_details(runs, details)
     if settings.get('who') != who:
         save_settings(env, dict(settings, who=who))
@@ -532,6 +533,44 @@ def command_receipt(env, args, out):
     return 0
 
 
+def prompt_for_run(env, details):
+    """(prompt text, note) for a run. The text was saved at start; an older run falls back to the task's
+    prompt file, with a note. It never comes from a session log."""
+    if details.get('prompt'):
+        return details['prompt'], None
+    try:
+        fallback = (task_folder(env, details['task']) / ('prompt-%s.md' % details['version'])).read_text(
+            encoding='utf-8').rstrip('\r\n')
+    except (KitError, OSError):
+        raise KitError('I did not save the prompt of %s when it started, and the task file is missing, so I cannot '
+                       'show it. Tell Adit.' % details['name'])
+    return fallback, ('This run began before prompts were saved, so this is the prompt file of the task as it is now. '
+                      'If someone edited it since, it may differ from what this run used.')
+
+
+def command_prompt(env, args, out):
+    """kit prompt: put a run's prompt back on the clipboard and print it. Default: the run started last."""
+    runs = runs_folder(env)
+    if args.run_name in (None, 'latest'):
+        everything = read_all_details(runs)
+        if not everything:
+            raise KitError('No runs yet. To begin one, say "start a run".')
+        details = everything[-1]
+    else:
+        details = find_run(runs, args.run_name)
+    prompt, note = prompt_for_run(env, details)
+    clipboard_ok = copy_to_clipboard(prompt)
+    print('Prompt for %s (%s, %s version):' % (details['name'], details['task'], details['version']), file=out)
+    print('----- START OF PROMPT -----', file=out)
+    print(prompt, file=out)
+    print('----- END OF PROMPT -----', file=out)
+    if note:
+        print(note, file=out)
+    print('It is on your clipboard.' if clipboard_ok else
+          'I could not reach the clipboard. Copy the prompt from between the two lines above.', file=out)
+    return 0
+
+
 def _table(rows):
     """Plain-text table: a list of rows, the first row being the header."""
     widths = [max(len(str(row[i])) for row in rows) for i in range(len(rows[0]))]
@@ -687,7 +726,7 @@ class PlainParser(argparse.ArgumentParser):
 
 
 def make_parser():
-    """The command line: check, start, finish, receipt, runs, update."""
+    """The command line: check, start, finish, receipt, prompt, runs, update."""
     parser = PlainParser(prog='python3 -m src.kit', description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest='command', required=True, parser_class=PlainParser)
     commands.add_parser('check', help='check that everything is ready')
@@ -702,13 +741,15 @@ def make_parser():
     show = commands.add_parser('receipt', help='open a receipt')
     show.add_argument('run_name', nargs='?')
     show.add_argument('--no-open', action='store_true')
+    again = commands.add_parser('prompt', help='show a run\'s prompt again')
+    again.add_argument('run_name', nargs='?')
     commands.add_parser('runs', help='list the runs')
     commands.add_parser('update', help='get the latest version of the tool')
     return parser
 
 
 COMMANDS = {'check': command_check, 'start': command_start, 'finish': command_finish,
-            'receipt': command_receipt, 'runs': command_runs, 'update': command_update}
+            'receipt': command_receipt, 'prompt': command_prompt, 'runs': command_runs, 'update': command_update}
 
 
 def inside_runs_folder(env, cwd):

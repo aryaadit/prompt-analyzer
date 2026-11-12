@@ -69,6 +69,7 @@ Type these in the Claude Code chat panel of the prompt-analyzer window. Your own
 | start run: sample, lean | The same, with the task and version given |
 | finish my run | Finds the session, builds the receipt, saves the numbers |
 | show me the receipt | Opens the receipt of the last finished run |
+| show me the prompt again | Puts the prompt of your latest run back on the clipboard and prints it |
 | show the runs | Lists every run so far: task, version, run, who, dollars, flag |
 | update the tool | Gets the newest version of the tool. It stops if you changed anything yourself |
 

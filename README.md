@@ -22,7 +22,7 @@ schedule, roles, and what is built.
 Week 1. Built and tested: the exact layer (parser, price table, plain-text summary) and the receipt
 page with its diagnosis. Open [`docs/demo-receipt.html`](docs/demo-receipt.html) to see one (made-up data, safe for slides).
 [`docs/METHOD.md`](docs/METHOD.md) explains every number on it. Also built: the teammate kit (`src/kit.py`): a setup check, a run starter and finisher,
-six plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
+seven plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
 Claude Code panel. Runs are saved outside the repo, in `prompt-analyzer-runs` in the home folder. Next: the experiment board, the lean prompt writer.
 
 ## Run it
