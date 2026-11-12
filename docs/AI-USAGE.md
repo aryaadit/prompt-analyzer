@@ -9,3 +9,4 @@ Add one line per work session.
 | 2026-11-12 | Adit | Claude | Wrote the project plan and scaffolded this repo (README, AGENTS.md, prompts) |
 | 2026-11-12 | Adit | Claude Code | Checked git and gh, initialized the repo, verified no sample, run, or report files were staged, and made the first commit |
 | 2026-11-12 | Adit | Claude Code | Inspected the structure of local Claude Code session logs with throwaway scripts (keys, types, counts only) and wrote docs/SCHEMA.md; no log content was copied |
+| 2026-11-12 | Adit | Claude Code | Built the exact layer: parser, price table, summary command, and synthetic-fixture tests (src/, tests/). Measured the transcript-versus-session-total gap and validated prices against cost-state on local logs (numbers only); looked up public prices through a web-fetch subagent; no log content was copied or sent anywhere |

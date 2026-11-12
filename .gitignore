@@ -1,5 +1,6 @@
 # Session logs and anything derived from them stay local
 *.jsonl
+!tests/fixtures/**/*.jsonl
 samples/*
 !samples/.gitkeep
 runs/*

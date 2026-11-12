@@ -62,10 +62,36 @@ screen is a stretch goal. Only start it if the evidence is in by December 2.
 | Reid | Cost method, plus the comparison against existing tools such as LangSmith |
 | Anna | The experiment (tasks, blind votes), the deck, and the video script |
 
+## Settled (from docs/SCHEMA.md and the exact layer, Nov 12)
+
+- **Granularity:** the log records tokens per model call only, nothing finer. Per-tool and
+  per-file costs will be estimates and must be labeled so.
+- **Usage counting:** count once per `message.id`. Subagent and workflow files hold their own
+  usage and must be read too.
+- **Session totals:** `cost-state` is cumulative, so the last record is the session total.
+- **Price check:** summed per call with the 5-minute and 1-hour cache-write split, our price
+  table reproduces `costUSD` on 71 of 71 exactly reconciling (session, model) entries, to
+  rounding error. Speed, service tier, long-context tier, and web search fees changed nothing.
+  The 5m/1h split is what matters. `cost-state`'s own split fields are incomplete, so only its
+  combined cache-write count is reliable.
+- **The gap:** session totals exceed the transcript. It is not mostly helper models (those are
+  41 of 148 entries and about $1). On one yardstick it is 8.0 to 8.3 percent of all session-total
+  dollars: 9.7 to 10.2 percent in sessions with a compaction, 0.5 to 0.6 percent in sessions
+  without. The range comes from pricing every cache write at the 5-minute or the 1-hour rate.
+
 ## Open questions
 
-- Which agent do Anna and Reid use in class: Claude Code, Codex, or Copilot?
-- Does the log record tokens per model call only, or anything finer?
+- Which agent do Anna and Reid use in class: Claude Code, Codex, or Copilot? Codex and Copilot
+  log formats are unknown, so this decides whether the parser needs a second format.
+- What is in the gap? It tracks compaction, but the cause is unconfirmed. A compaction
+  summary call that writes no `assistant` record is the leading guess.
+- Does top-level `usage` include `fallback_message` iterations? Only 4 cases. (SCHEMA open
+  question 3.)
+- Can `api-request` tail hashes be resolved to give exact per-message sizes? (SCHEMA open
+  question 4.) This would replace the growth-method estimates for tool results.
+- The price page shows display names, not API ids, and no "last updated" date. We map log ids
+  to names by convention (`claude-fable-5-1` is "Claude Fable 5.1"). Recheck the page before
+  the experiments on Nov 26.
 - Presentation length. The Session 2 slides say 5 minutes in a 7-minute slot. The syllabus
   says 7 minutes plus Q&A. Confirm with the professors.
 - We switched project type to Build It for Yourself after Session 2. Mention it to the professors.
