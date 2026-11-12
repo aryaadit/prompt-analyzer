@@ -15,9 +15,10 @@ import os
 import sys
 import tempfile
 import webbrowser
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import estimate, fmt, parse, prices
+from . import estimate, fmt, parse, paths, prices
 from .fmt import count, minutes, short_tokens
 from .summarize import REPO_ROOT
 
@@ -67,13 +68,15 @@ def num(value, kind):
 
 
 def display_path(path, cwd):
-    """A path relative to the project folder, with the home folder shown as ~."""
+    """A path relative to the project folder, with the home folder shown as ~. Mac and Windows paths."""
     home = os.path.expanduser('~')
-    if cwd and path.startswith(cwd.rstrip('/') + '/'):
-        return os.path.relpath(path, cwd)
-    if path == home or path.startswith(home + '/'):
-        return '~' + path[len(home):]
-    return path
+    inside = paths.relative_under(path, cwd)
+    if inside is not None:
+        return inside
+    under_home = paths.relative_under(path, home)
+    if under_home is not None:
+        return '~' + paths.flavor(home).sep + under_home
+    return '~' if path == home else path
 
 
 def clean_url(url):
@@ -709,7 +712,7 @@ def main(argv=None, out=None):
         _write(_target_path(args.json, '.receipt.json', est['session']['session_id']), json.dumps(est, indent=2))
     _report(est, html_path, out)
     if not args.no_open:
-        webbrowser.open('file://' + os.path.abspath(html_path))
+        webbrowser.open(Path(html_path).resolve().as_uri())
     return 0
 
 

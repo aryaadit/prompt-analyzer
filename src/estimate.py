@@ -12,12 +12,11 @@ Vocabulary used in the code, the JSON, and the page:
   new cost        what an item cost the first time it was sent to the model (estimated)
   carried cost    what it cost to send that item again on every later call (estimated)
 """
-import os
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime
 
-from . import bash, diagnose, prices, summarize
+from . import bash, diagnose, paths, prices, summarize
 
 CHARS_PER_TOKEN = 2.6  # typed text: measured on real logs (2.1 to 2.6 on clean gaps; harness text inflates growth)
 REBUILD_FACTOR = 2.0  # a call "rebuilt the cache" when it paid for more than this many times the new tokens...
@@ -288,7 +287,7 @@ def _words(items):
 def _phrase(tool_call):
     """Plain words for one tool call. File names are base names only."""
     tool, target = tool_call['tool'], tool_call['target']
-    name = os.path.basename(target) if target and tool_call['target_kind'] == 'file_path' else None
+    name = paths.basename(target) if target and tool_call['target_kind'] == 'file_path' else None
     if tool == 'Bash':
         words = (tool_call.get('bash') or {}).get('words') or []
         return 'Ran ' + (_words(words[:3]) if words else 'a command')
@@ -411,11 +410,7 @@ def _unlinked(subs, parent, accounted, rolled, children):
 
 def _path_key(path, cwd):
     """One key per file: absolute, with relative paths resolved against the project folder."""
-    if not path:
-        return None
-    if path.startswith('~') or os.path.isabs(path) or not cwd:
-        return os.path.normpath(path)
-    return os.path.normpath(os.path.join(cwd, path))
+    return paths.path_key(path, cwd)
 
 
 def _file_events(step, cwd):
@@ -498,7 +493,7 @@ def _session_facts(session, calls):
     first, last = (min(stamps), max(stamps)) if stamps else ('', '')
     seconds = (minutes_between(first, last) or 0.0) * 60
     return {'session_id': session['session_id'], 'cwd': session['cwd'],
-            'project': os.path.basename((session['cwd'] or '').rstrip('/')) or session['session_id'][:8],
+            'project': paths.basename(session['cwd']) or session['session_id'][:8],
             'started': first, 'ended': last, 'duration_seconds': seconds,
             'models': sorted(models, key=lambda m: -models[m]), 'calls': len(calls),
             'tool_calls': sum(len(c['tool_calls']) for c in calls)}

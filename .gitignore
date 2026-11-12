@@ -18,3 +18,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Kit settings: runs folder and first name
+local-settings.json

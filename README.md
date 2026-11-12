@@ -6,6 +6,8 @@ Group project for B8609 Generative AI for Business (Columbia Business School, Fa
 Track: Build It for Yourself. Team: Adit Arya, Anna Liedtke, Reid Yankowski.
 Presentation: Wednesday, December 9, 2026.
 
+**Running the experiment (Anna, Reid)? Read [`docs/START-HERE.md`](docs/START-HERE.md).** One page, plain words.
+
 **New here? Read [`docs/GAME-PLAN.md`](docs/GAME-PLAN.md) first.** It is the project plan: goal,
 schedule, roles, and what is built.
 
@@ -19,7 +21,9 @@ schedule, roles, and what is built.
 
 Week 1. Built and tested: the exact layer (parser, price table, plain-text summary) and the receipt
 page with its diagnosis. Open [`docs/demo-receipt.html`](docs/demo-receipt.html) to see one (made-up data, safe for slides).
-[`docs/METHOD.md`](docs/METHOD.md) explains every number on it. Next: the teammate kit, the experiment board, the lean prompt writer.
+[`docs/METHOD.md`](docs/METHOD.md) explains every number on it. Also built: the teammate kit (`src/kit.py`): a setup check, a run starter and finisher,
+six plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
+Claude Code panel. Runs are saved outside the repo, in `prompt-analyzer-runs` in the home folder. Next: the experiment board, the lean prompt writer.
 
 ## Run it
 
@@ -33,6 +37,19 @@ python3 -m src.audit all                       # gap and price check across all 
 python3 -m src.audit receipts                  # build every receipt in memory (no files) and report how it went
 python3 -m unittest                            # run the tests
 ```
+
+The teammate kit (teammates type sentences instead; see `docs/START-HERE.md`). Use `python` or `py` if `python3` is not the name on your machine:
+
+```
+python3 -m src.kit check                                # is this laptop ready? one line per item
+python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]   # fresh run folder, prompt on the clipboard, new VS Code window
+python3 -m src.kit finish [<run folder name>]           # receipt, one results.csv row, a flag if the run needs a second look
+python3 -m src.kit receipt [latest | <run folder name>] # open a run's receipt
+python3 -m src.kit runs                                 # table of runs so far
+python3 -m src.kit update                               # git pull --ff-only, and stops if you changed anything
+```
+
+Settings live in `local-settings.json` in the repo root (gitignored): `runs_folder` (default `~/prompt-analyzer-runs`) and `who`.
 
 `--session` takes a path, a session id, `latest`, or a folder (the latest session that ran in it). Add `--no-open`
 to skip the browser, `--out <path>` to choose the file, and `--json` to also write the numbers. Files go to `reports/`,
@@ -52,10 +69,12 @@ receipt shows the transcript total only and says so.
 | `docs/demo-receipt.html` | A receipt built from made-up data. Open it in a browser. Safe to share |
 | `docs/AI-USAGE.md` | Running note of how we used AI (course policy) |
 | `prompts/` | The prompts we give the coding agent, in order |
-| `src/` | Parser, price table, the estimated layer, the receipt page, summary, audit (rematch runner later) |
+| `src/` | Parser, price table, the estimated layer, the receipt page, summary, audit, the teammate kit `kit.py` (rematch runner later) |
 | `tests/` | Unit tests, with synthetic fixtures under `tests/fixtures/` |
 | `skill/` | The packaged skill (later) |
-| `experiments/` | Task definitions and results tables |
+| `experiments/tasks/<task>/` | One task: `task.md`, `start/` (made-up starting files), `prompt-original.md`, `prompt-lean.md`. `sample` is a practice task |
+| `.claude/` | Project skills (one per plain-English action) and `settings.json`, which allows only the kit commands |
+| `docs/START-HERE.md` | One page for Anna and Reid: setup, every run, what to type |
 | `samples/`, `runs/`, `reports/` | Local only. Never committed |
 
 ## Privacy

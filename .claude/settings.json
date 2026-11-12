@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m src.kit *)",
+      "Bash(python -m src.kit *)",
+      "Bash(py -m src.kit *)",
+      "PowerShell(python3 -m src.kit *)",
+      "PowerShell(python -m src.kit *)",
+      "PowerShell(py -m src.kit *)",
+      "Bash(git pull)",
+      "Bash(git pull --ff-only)",
+      "Bash(git fetch)"
+    ]
+  }
+}

@@ -166,7 +166,7 @@ Each step is one prompt and one agent session.
 - Prompt 2, map the log format: done. The output is docs/SCHEMA.md.
 - Prompt 3, parser, price table, and plain-text summary: done on November 12.
 - Prompt 4, per-step estimates, the receipt page, and a demo receipt: done on November 12. See prompts/04-receipt.md and docs/METHOD.md. Open docs/demo-receipt.html to see the page.
-- Prompt 5, the teammate kit: a setup check, plain-English commands, and a run starter. Before November 14.
+- Prompt 5, the teammate kit: a setup check, plain-English commands, and a run starter: done on November 12. See prompts/05-teammate-kit.md and docs/START-HERE.md. Runs live outside the repo, in prompt-analyzer-runs in the home folder.
 - Prompt 6, the experiment board and the task sheets. Before November 14.
 - Prompt 7, the lean prompt writer, which reads the receipt's findings. Before November 14.
 - Prompt 8, clean-up for the demo: redaction and the README. After December 1.

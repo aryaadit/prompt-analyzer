@@ -9,6 +9,7 @@ import os
 import re
 from collections import Counter
 
+from . import paths
 from .bash import analyze_command, first_word
 
 PROJECTS_ROOT = os.path.expanduser('~/.claude/projects')
@@ -446,8 +447,15 @@ def _segments(boundaries):
 
 # ---------------------------------------------------------------- finding sessions
 
+MAX_FOLDER_NAME = 200  # Claude Code cuts longer folder names to this length and adds a hash (per its docs)
+
+
 def encode_cwd(cwd):
-    """Encode a working directory the way Claude Code names its project folders."""
+    """Encode a working directory the way Claude Code names its project folders.
+
+    Every character that is not a letter or digit becomes "-", so "/Users/ann/my work" gives
+    "-Users-ann-my-work" and "C:\\Users\\Ann\\my work" gives "C--Users-Ann-my-work".
+    """
     return re.sub(r'[^A-Za-z0-9]', '-', cwd)
 
 
@@ -457,13 +465,50 @@ def list_sessions(root=PROJECTS_ROOT):
     return sorted(paths, key=os.path.getmtime)
 
 
+def _folder_names(cwd):
+    """Folder names Claude Code might have used for this working directory (as typed, and resolved)."""
+    names = {encode_cwd(cwd)}
+    if not paths.is_windows_path(cwd) and os.path.isabs(cwd):
+        names.add(encode_cwd(os.path.realpath(cwd)))  # a symlinked path such as /tmp -> /private/tmp
+    return names
+
+
+def _matches(folder, wanted, ignore_case):
+    """True when a folder name is one of the wanted names (or the long-name form of one)."""
+    name = folder.lower() if ignore_case else folder
+    for want in wanted:
+        want = want.lower() if ignore_case else want
+        if name == want or (len(want) > MAX_FOLDER_NAME and len(name) > MAX_FOLDER_NAME
+                            and name.startswith(want[:MAX_FOLDER_NAME])):
+            return True
+    return False
+
+
+def sessions_for_cwd(cwd, root=PROJECTS_ROOT):
+    """Return every top-level session file that ran in a working directory, oldest first.
+
+    Works for Mac and Windows paths. Windows paths are matched without regard to upper or
+    lower case, because a drive letter can be written either way.
+    """
+    wanted = _folder_names(cwd)
+    ignore_case = paths.is_windows_path(cwd)
+    try:
+        folders = [e.name for e in os.scandir(root) if e.is_dir()]
+    except OSError:
+        return []
+    found = []
+    for folder in sorted(folders):
+        if _matches(folder, wanted, ignore_case):
+            found.extend(glob.glob(os.path.join(glob.escape(os.path.join(root, folder)), '*.jsonl')))
+    return sorted(found, key=os.path.getmtime)
+
+
 def latest_session(cwd, root=PROJECTS_ROOT):
     """Return the most recently modified top-level session file for a working directory."""
-    folder = os.path.join(root, encode_cwd(cwd))
-    paths = glob.glob(os.path.join(glob.escape(folder), '*.jsonl'))
-    if not paths:
+    found = sessions_for_cwd(cwd, root)
+    if not found:
         raise FileNotFoundError('no sessions found for this working directory')
-    return max(paths, key=os.path.getmtime)
+    return found[-1]
 
 
 def resolve_session(arg, cwd, root=PROJECTS_ROOT):

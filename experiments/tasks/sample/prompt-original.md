@@ -1,0 +1,1 @@
+Please read the two text files in this folder, garden-log.txt and garden-plan.txt, and write a one-paragraph summary of them. Save the summary as summary.md. Take a careful look at both files before you start writing.
