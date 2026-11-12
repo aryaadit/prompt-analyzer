@@ -1,4 +1,6 @@
 """Tests for src/prices.py and src/reconcile.py."""
+import contextlib
+import io
 import unittest
 
 from src import audit, parse, prices, reconcile
@@ -59,6 +61,15 @@ class PriceTableTest(unittest.TestCase):
                 'inference_geo': 'us', 'web_search_requests': 0}
         self.assertAlmostEqual(prices.price_call(call), 20.0 * 2.0 * 1.1)
 
+    def test_validated_flags(self):
+        for model in ('claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-4-8'):
+            self.assertTrue(prices.is_validated(model), model)
+        for model in ('claude-fable-5', 'claude-fable-5-2', 'claude-haiku-5-5',
+                      'claude-haiku-4-5-20251001', 'claude-unknown-9'):
+            self.assertFalse(prices.is_validated(model), model)
+        flagged = {m for m, row in prices.PRICES.items() if row['validated']}
+        self.assertEqual(flagged, set(prices.VALIDATED_MODELS))
+
     def test_table_records_its_source_and_date(self):
         self.assertTrue(prices.PRICES_URL.startswith('https://'))
         self.assertRegex(prices.PRICES_CHECKED, r'^\d{4}-\d{2}-\d{2}$')
@@ -116,6 +127,31 @@ class ValidationTest(unittest.TestCase):
         by_name = {row['variant']: row for row in result['rows']}
         self.assertLess(by_name['a1']['matched'], 2)  # the 1h write in the Sonnet entry needs the split
         self.assertEqual(by_name['b-e']['matched'], 2)
+
+    def test_validation_status_says_which_flags_to_change(self):
+        entries, items, _ = audit.load_all(FIXTURE_ROOT)
+        rows = {r['model']: r for r in prices.validation_status(items, {e['model'] for e in entries})}
+        self.assertEqual(rows['claude-sonnet-5-5']['status'], 'ok')
+        self.assertEqual(rows['claude-haiku-5-5']['status'], 'set validated to True')
+        self.assertEqual(rows['claude-opus-5-5']['status'], 'set validated to False (no exact entry)')
+        self.assertEqual(rows['claude-fable-5']['status'], 'ok (no exact entry yet)')  # unflagged, unseen
+        self.assertEqual(rows['claude-unknown-9']['status'], 'no public price')
+        self.assertIsNone(rows['claude-unknown-9']['flag'])
+
+    def test_validation_status_flags_a_mismatch(self):
+        _, items, _ = audit.load_all(FIXTURE_ROOT)
+        wrong = [dict(i, cost_usd=i['cost_usd'] * 2) for i in items]
+        rows = {r['model']: r for r in prices.validation_status(wrong)}
+        self.assertEqual(rows['claude-sonnet-5-5']['status'],
+                         'set validated to False (an exact entry does not match costUSD)')
+
+    def test_audit_prints_the_validated_report(self):
+        entries, items, _ = audit.load_all(FIXTURE_ROOT)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            audit.print_validated_models(items, entries)
+        self.assertIn('VALIDATED MODELS', out.getvalue())
+        self.assertIn('claude-haiku-5-5: set validated to True', out.getvalue())
 
     def test_audit_counts_sessions_without_cost_state(self):
         _, _, sessions = audit.load_all(FIXTURE_ROOT)

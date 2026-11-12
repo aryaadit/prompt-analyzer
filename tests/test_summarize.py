@@ -33,6 +33,7 @@ class SummaryStructureTest(unittest.TestCase):
         self.assertEqual(totals['calls_without_public_price'], 1)
         self.assertAlmostEqual(totals['share_calls_without_public_price'], 1 / 7)
         self.assertEqual(totals['models_without_public_price'], ['claude-unknown-9'])
+        self.assertEqual(totals['models_not_validated'], ['claude-haiku-5-5'])  # unpriced ones excluded
         self.assertEqual(totals['tokens']['output'], 300 + 80 + 50 + 5 + 40 + 25 + 10)
 
     def test_unpriced_calls_have_no_dollars_but_keep_tokens(self):
@@ -93,6 +94,17 @@ class SummaryTextTest(unittest.TestCase):
                        'TOOL CALLS BY TOOL', 'RECONCILIATION', 'not attributed to a transcript call',
                        'Session total', 'Attributed total', 'checked 2026-11-12'):
             self.assertIn(needle, self.text)
+
+    def test_unvalidated_model_line(self):
+        line = 'claude-haiku-5-5: price from the public page, not yet checked against a session total'
+        self.assertEqual(self.text.count('not yet checked against a session total'), 1)
+        self.assertIn(line, self.text)
+        self.assertNotIn('claude-sonnet-5-5: price from', self.text)
+
+    def test_no_unvalidated_line_when_every_model_is_validated(self):
+        text = text_of(build(SESSION_2))  # claude-opus-4-8 only
+        self.assertNotIn('not yet checked', text)
+        self.assertEqual(build(SESSION_2)['totals']['models_not_validated'], [])
 
     def test_unpriced_share_is_listed(self):
         self.assertIn('1 of 7 calls (14.3%)', self.text)

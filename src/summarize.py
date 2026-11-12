@@ -134,7 +134,10 @@ def build_summary(session):
                    'calls_without_public_price': unpriced,
                    'share_calls_without_public_price': unpriced / len(calls) if calls else 0.0,
                    'models_without_public_price': sorted(
-                       {c['model'] for c in calls if c['usd'] is None})},
+                       {c['model'] for c in calls if c['usd'] is None}),
+                   'models_not_validated': sorted(
+                       {c['model'] for c in calls
+                        if c['usd'] is not None and not prices.is_validated(c['model'])})},
         'by_model': _group(calls, lambda c: c['model']),
         'by_source': _group(calls, lambda c: 'main session' if c['source'] == 'main' else 'subagents'),
         'top_calls_by_cost': [c['order'] for c in ranked[:10]],
@@ -213,6 +216,8 @@ def _print_overview(summary, out):
         for name, g in groups.items():
             note = '  (%d calls: %s)' % (g['unpriced_calls'], NO_PRICE) if g['unpriced_calls'] else ''
             print('    %-28s %6d calls  %14s%s' % (name, g['calls'], money(g['usd']), note), file=out)
+    if totals['models_not_validated']:
+        print('  %s: %s' % (', '.join(totals['models_not_validated']), prices.NOT_VALIDATED_NOTE), file=out)
     if totals['calls_without_public_price']:
         print('  %s: %d of %d calls (%.1f%%), models %s. Tokens are shown; dollars left out.'
               % (NO_PRICE, totals['calls_without_public_price'], totals['calls'],

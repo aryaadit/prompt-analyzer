@@ -14,11 +14,7 @@ TOKEN_TYPES = ('input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'outpu
 # Dollars per million tokens: input, cache_write_5m, cache_write_1h, cache_read, output.
 # The page lists display names only. Log ids are mapped to display names by naming convention
 # (for example claude-fable-5-1 is "Claude Fable 5.1"). Ids with no row here have no public price.
-# Checked on 2026-11-12 against cost-state costUSD, on the 71 entries whose transcript reconciles
-# exactly: claude-sonnet-5-5 (28 entries), claude-opus-5-5 (33), claude-fable-5-1 (9 entries,
-# 779 calls), claude-opus-4-8 (1 entry, 6 calls) all matched to rounding error. These rows have
-# NOT been checked that way, because no exactly reconciling entry uses them: claude-fable-5-2,
-# claude-fable-5, claude-haiku-5-5, claude-haiku-4-5. Rerun `python3 -m src.audit prices` to refresh.
+# Each row carries a validated flag (see VALIDATED_MODELS below).
 _ROWS = {
     'claude-fable-5-2': ('Claude Fable 5.2', 8, 10, 16, 0.20, 40),
     'claude-fable-5-1': ('Claude Fable 5.1', 10, 12.50, 20, 0.25, 50),
@@ -29,9 +25,18 @@ _ROWS = {
     'claude-haiku-5-5': ('Claude Haiku 5.5, prompts up to 100,000 tokens', 0.10, 0.125, 0.20, 0.01, 0.50),
     'claude-haiku-4-5': ('Claude Haiku 4.5', 1, 1.25, 2, 0.10, 5),
 }
+
+# True only if the model appears in an exactly reconciling (session, model) entry and our
+# per-call dollars matched cost-state costUSD there. Last checked 2026-11-12 (71 entries:
+# claude-sonnet-5-5 28, claude-opus-5-5 33, claude-fable-5-1 9, claude-opus-4-8 1). Every row is
+# priced from the public page either way; the flag only says whether that was also checked
+# against a session total. `python3 -m src.audit prices` says which flags to change.
+VALIDATED_MODELS = ('claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-4-8')
+NOT_VALIDATED_NOTE = 'price from the public page, not yet checked against a session total'
+
 PRICES = {
     model: {'name': row[0], 'input': row[1], 'cache_write_5m': row[2], 'cache_write_1h': row[3],
-            'cache_read': row[4], 'output': row[5]}
+            'cache_read': row[4], 'output': row[5], 'validated': model in VALIDATED_MODELS}
     for model, row in _ROWS.items()
 }
 
@@ -60,6 +65,12 @@ def canonical_model(model):
         return model
     dated = re.sub(r'-\d{8}$', '', model)
     return dated if dated in PRICES else None
+
+
+def is_validated(model):
+    """True when the model has a public price that was also checked against a session total."""
+    key = canonical_model(model)
+    return key is not None and PRICES[key]['validated']
 
 
 def rates_for(model, prompt_tokens=None, long_context=True):
@@ -207,3 +218,39 @@ def _ratios_by_model(items):
         values.sort()
         summary[model] = (len(values), values[0], values[len(values) // 2], values[-1])
     return summary
+
+
+def validation_status(items, seen_models=()):
+    """Say, per model, whether its validated flag matches what the exact entries show.
+
+    items are the exactly reconciling entries given to validate(). seen_models are other log
+    model ids to list (those with no table row show as "no public price"). A model is
+    confirmed when it appears in an exact entry and every such entry matches costUSD.
+    """
+    found = {}
+    for item in items:
+        key = canonical_model(item['model'])
+        if key is None:
+            continue
+        row = found.setdefault(key, {'entries': 0, 'matched': 0, 'calls': 0})
+        row['entries'] += 1
+        row['calls'] += len(item['calls'])
+        row['matched'] += _matches(_entry_usd(item, {}), item['cost_usd'])
+    rows = []
+    for key in sorted(set(PRICES) | {canonical_model(m) or m for m in seen_models}):
+        if key not in PRICES:
+            rows.append({'model': key, 'flag': None, 'entries': 0, 'matched': 0, 'calls': 0,
+                         'status': 'no public price'})
+            continue
+        row = found.get(key, {'entries': 0, 'matched': 0, 'calls': 0})
+        confirmed = row['entries'] > 0 and row['matched'] == row['entries']
+        flag = PRICES[key]['validated']
+        if confirmed == flag:
+            status = 'ok' if confirmed else 'ok (no exact entry yet)'
+        elif confirmed:
+            status = 'set validated to True'
+        else:
+            status = 'set validated to False (%s)' % (
+                'an exact entry does not match costUSD' if row['entries'] else 'no exact entry')
+        rows.append(dict(row, model=key, flag=flag, status=status))
+    return rows

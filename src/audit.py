@@ -136,6 +136,20 @@ def print_validation(items):
     print('exact entries with web searches in cost-state: %d' % sum(1 for i in items if i['web_searches']))
 
 
+def print_validated_models(items, entries):
+    """Print which models count as validated, and whether each validated flag is right."""
+    rows = prices.validation_status(items, {e['model'] for e in entries})
+    print('\nVALIDATED MODELS (flag in src/prices.py vs what the exactly reconciling entries show)')
+    print('%-28s %-9s %8s %8s %6s  %s' % ('model', 'flag', 'entries', 'matched', 'calls', 'status'))
+    for row in rows:
+        flag = '-' if row['flag'] is None else str(row['flag'])
+        print('%-28s %-9s %8d %8d %6d  %s' % (row['model'], flag, row['entries'], row['matched'],
+                                              row['calls'], row['status']))
+    todo = [r for r in rows if not r['status'].startswith('ok') and r['status'] != 'no public price']
+    print('flags to change: %s' % ('none' if not todo else '; '.join(
+        '%s: %s' % (r['model'], r['status']) for r in todo)))
+
+
 def main(argv=None):
     """Run the requested audit over every session under the projects folder."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -147,6 +161,7 @@ def main(argv=None):
         print_gap(entries, sessions)
     if args.what in ('prices', 'all'):
         print_validation(items)
+        print_validated_models(items, entries)
     return 0
 
 
