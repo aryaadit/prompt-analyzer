@@ -43,7 +43,7 @@ The teammate kit (teammates type sentences instead; see `docs/START-HERE.md`). U
 ```
 python3 -m src.kit check                                # is this laptop ready? one line per item
 python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]   # fresh run folder, prompt on the clipboard, new VS Code window
-python3 -m src.kit finish [<run folder name>]           # receipt, one results.csv row, a flag if the run needs a second look
+python3 -m src.kit finish [<run folder name>]           # receipt, one results.csv row (with model and effort), a flag if the run needs a second look (including a different model or effort from the first run)
 python3 -m src.kit receipt [latest | <run folder name>] # open a run's receipt
 python3 -m src.kit prompt [latest | <run folder name>]  # put a run's prompt back on the clipboard and print it
 python3 -m src.kit runs                                 # table of runs so far

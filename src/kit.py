@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import webbrowser
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -41,7 +42,7 @@ _SLUG = re.compile(r'^[a-z0-9][a-z0-9-]*$')
 _RUN_NAME = re.compile(r'^(?P<task>[a-z0-9][a-z0-9-]*)-(?P<version>original|lean)-(?P<run>\d+)$')
 GO_BACK = 'Go back to the prompt-analyzer window to do this, so the run stays clean.'
 CSV_COLUMNS = (
-    'practice', 'task', 'version', 'run', 'who', 'model', 'date', 'minutes', 'model_calls', 'tool_calls', 'tool_errors',
+    'practice', 'task', 'version', 'run', 'who', 'model', 'effort', 'date', 'minutes', 'model_calls', 'tool_calls', 'tool_errors',
     'input_tokens', 'cache_read_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens',
     'total_usd_api_equivalent', 'cache_rebuilds', 'compacted', 'check_this', 'check_reasons', 'session_id')
 
@@ -329,18 +330,19 @@ def next_steps(details, task_dir, clipboard_ok, vscode_ok, prompt):
                   '----- END OF PROMPT (copy everything above this line) -----']
     lines += ['', 'Next steps:',
               '1. In the new VS Code window, open Claude Code and start a NEW session (a fresh chat).',
-              '2. Check that Claude Code is on the same model as in your other runs of this task.',
+              '2. Type /model. Pick Sonnet 5.5, set Effort to High, leave Ultracode off. Same every run.',
               '3. Paste the prompt (Cmd+V on a Mac, Ctrl+V on Windows) and press Enter.',
               '4. Do not add anything to it.',
-              '5. Do not step away until it finishes. A pause lets the saved copy of the conversation expire, '
+              '5. If a permission prompt appears, click Yes.',
+              '6. Do not step away until it finishes. A pause lets the saved copy of the conversation expire, '
               'which makes it rebuild and changes the cost.']
     answers = task_answers(task_dir)
     if answers:
-        lines += ['6. If it asks a question, answer from this list (it is the same for every run):'] + [
+        lines += ['7. If it asks a question, answer from this list (it is the same for every run):'] + [
             '   ' + line for line in answers]
     else:
-        lines.append('6. If it asks a question, answer from task.md (experiments/tasks/%s/task.md).' % details['task'])
-    lines += ['7. When it finishes, come back to the prompt-analyzer window and say: finish my run']
+        lines.append('7. If it asks a question, answer from task.md (experiments/tasks/%s/task.md).' % details['task'])
+    lines += ['8. When it finishes, come back to the prompt-analyzer window and say: finish my run']
     return '\n'.join(lines)
 
 
@@ -378,18 +380,43 @@ def model_names(est):
     return '; '.join(est['session']['models'])
 
 
-def reference_model(runs, details, model):
-    """The model of the first run of the same task, or None when this run is the first one."""
+def effort_names(session):
+    """The effort levels the main thread ran at, as one text (most calls first), as the log records them
+    (api-request output_config.effort). Empty when the log does not say."""
+    counts = Counter(c['effort'] for c in session['calls'] if c['source'] == 'main' and c.get('effort'))
+    return '; '.join(name for name, _ in counts.most_common())
+
+
+def reference_run(runs, details):
+    """The details of the first finished run of the same task, or None when this run is the first one."""
     same_task = [d for d in read_all_details(runs) if d['task'] == details['task'] and d['name'] != details['name']
                  and d.get('model')]
     if not same_task:
         return None
     first = same_task[0]
     mine = estimate.parse_time(details['started']) or LONG_AGO
-    return first['model'] if (estimate.parse_time(first['started']) or LONG_AGO) < mine else None
+    return first if (estimate.parse_time(first['started']) or LONG_AGO) < mine else None
 
 
-def session_flags(session, est, model_before=None):
+def setting_flags(session, est, first):
+    """Plain reasons when the model or effort differs from the first run of the same task."""
+    reasons = []
+    if not first:
+        return reasons
+    if first.get('model') and set(first['model'].split('; ')) != set(est['session']['models']):
+        reasons.append('this run used a different model (%s) from the first run of this task (%s), so the cost is '
+                       'not comparable' % (model_names(est), first['model']))
+    mine = effort_names(session)
+    if first.get('effort') and mine and set(first['effort'].split('; ')) != set(mine.split('; ')):
+        reasons.append('this run used a different effort (%s) from the first run of this task (%s), so the cost is '
+                       'not comparable' % (mine, first['effort']))
+    elif first.get('effort') and not mine:
+        reasons.append('the log does not say which effort this run used, so I cannot confirm it matches the first '
+                       'run of this task (%s)' % first['effort'])
+    return reasons
+
+
+def session_flags(session, est, first=None):
     """The plain reasons a run needs a second look. Empty means nothing to check."""
     reasons = []
     if est['rebuilds']:
@@ -404,10 +431,7 @@ def session_flags(session, est, model_before=None):
         reasons.append('the session did not finish (it did not end with a final answer)')
     if est['models_without_public_price']:
         reasons.append('some calls use a model with no public price, so the total is incomplete')
-    if model_before and set(model_before.split('; ')) != set(est['session']['models']):
-        reasons.append('this run used a different model (%s) from the first run of this task (%s), so the cost is '
-                       'not comparable' % (model_names(est), model_before))
-    return reasons
+    return reasons + setting_flags(session, est, first)
 
 
 def build_result(details, session, est, reasons):
@@ -418,7 +442,7 @@ def build_result(details, session, est, reasons):
     return {
         'practice': 'yes' if details.get('practice') else 'no', 'task': details['task'],
         'version': details['version'], 'run': details['run'], 'who': details['who'],
-        'model': model_names(est), 'date': started.date().isoformat() if started else '',
+        'model': model_names(est), 'effort': effort_names(session), 'date': started.date().isoformat() if started else '',
         'minutes': round(facts['duration_seconds'] / 60, 1), 'model_calls': facts['calls'],
         'tool_calls': facts['tool_calls'], 'tool_errors': tool_error_count(session), 'input_tokens': tokens['input'], 'cache_read_tokens': tokens['cache_read'],
         'cache_write_5m_tokens': tokens['cache_write_5m'], 'cache_write_1h_tokens': tokens['cache_write_1h'],
@@ -494,10 +518,11 @@ def command_finish(env, args, out):
     runs = runs_folder(env)
     details = find_run(runs, args.run_name) if args.run_name else pick_unfinished(runs)
     session, est, page = _build_receipt(env, details)
-    reasons = session_flags(session, est, reference_model(runs, details, model_names(est)))
+    reasons = session_flags(session, est, reference_run(runs, details))
     row = build_result(details, session, est, reasons)
     upsert_result(runs, row)
-    details.update({'finished': now_text(), 'model': model_names(est), 'session_id': est['session']['session_id'],
+    details.update({'finished': now_text(), 'model': model_names(est), 'effort': effort_names(session),
+                    'session_id': est['session']['session_id'],
                     'total_usd': est['totals']['transcript_usd'], 'check_this': bool(reasons),
                     'check_reasons': reasons})
     write_details(runs, details)

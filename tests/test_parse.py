@@ -184,3 +184,47 @@ class FindingSessionsTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EffortTest(unittest.TestCase):
+    """The effort of each call comes from the api-request params; nothing else of the request is kept."""
+
+    def parse_lines(self, records):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = os.path.join(folder, 'abc.jsonl')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('\n'.join(json.dumps(r) for r in records) + '\n')
+        return {c['id']: c for c in parse.parse_session(path)['calls']}
+
+    @staticmethod
+    def reply(message_id, **extra):
+        usage = {'input_tokens': 1, 'output_tokens': 1, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}
+        record = {'type': 'assistant', 'timestamp': '2026-01-01T00:00:00Z',
+                  'message': {'id': message_id, 'model': 'claude-sonnet-5-5', 'usage': usage, 'content': []}}
+        record.update(extra)
+        return record
+
+    @staticmethod
+    def request(request_id, effort='high', **params):
+        params = dict(params, model='claude-sonnet-5-5', output_config={'effort': effort})
+        return {'type': 'api-request', 'id': request_id, 'params': params}
+
+    def test_effort_is_read_from_the_request_the_call_answers(self):
+        calls = self.parse_lines([self.request('r1', 'high'), self.reply('m1', requestRef='r1'),
+                                  self.request('r2', 'medium'), self.reply('m2', requestRef='r2')])
+        self.assertEqual((calls['m1']['effort'], calls['m2']['effort']), ('high', 'medium'))
+
+    def test_a_request_logged_after_its_reply_still_matches(self):
+        calls = self.parse_lines([self.reply('m1', requestRef='r1'), self.request('r1', 'xhigh')])
+        self.assertEqual(calls['m1']['effort'], 'xhigh')
+
+    def test_the_assistant_records_own_effort_is_the_fallback(self):
+        calls = self.parse_lines([self.reply('m1', effort='high'), self.reply('m2')])
+        self.assertEqual((calls['m1']['effort'], calls['m2']['effort']), ('high', None))
+
+    def test_odd_effort_values_are_ignored_and_nothing_else_of_the_request_is_kept(self):
+        calls = self.parse_lines([self.request('r1', 'a long sentence, not a level', betas=['x']),
+                                  self.reply('m1', requestRef='r1')])
+        self.assertIsNone(calls['m1']['effort'])
+        self.assertFalse([k for k in calls['m1'] if k.startswith('_') or k in ('params', 'betas')])

@@ -31,6 +31,7 @@ starting any task.
 - Every page follows `docs/DESIGN.md`. Read it before building or changing any page.
 - Pages are one self-contained HTML file. No build step and no network requests. The only
   approved script is Apache ECharts from `vendor/`, inlined into the page.
+- Rebuild `docs/demo-receipt.html` only when the page design changes, not on every commit.
 - Label every cost number as **exact** (read from the log) or **estimated**.
 - Label every dollar figure as **API-equivalent**. Keep prices in one table with the date checked.
 - Small functions, plain names, a short docstring on each. Tests for the parser.

@@ -129,6 +129,7 @@ Every `assistant` record carries `message.usage`:
 | `output_tokens_details.thinking_tokens` | The thinking part of `output_tokens` (34,256 records) |
 | `server_tool_use.web_search_requests`, `.web_fetch_requests` | Server-side tool counts |
 | `service_tier`, `speed`, `inference_geo` | Billing context |
+| `api-request.params.output_config.effort` (found through `assistant.requestRef`; the assistant record's own `effort` is the fallback) | The effort level of the call (for example `high`). The parser keeps only this one setting of the request. |
 | `iterations[]` | Per-iteration copy of the four counts above plus `type` and (sometimes) `model` |
 
 All are **exact**, read from the log.

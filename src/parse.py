@@ -14,8 +14,8 @@ from .bash import analyze_command, first_word
 
 PROJECTS_ROOT = os.path.expanduser('~/.claude/projects')
 SYNTHETIC_MODEL = '<synthetic>'
-RECORD_TYPES = ('assistant', 'user', 'system', 'cost-state', 'attachment')
-_TYPE_RE = re.compile(r'"type"\s*:\s*"(assistant|user|system|cost-state|attachment)"')
+RECORD_TYPES = ('assistant', 'user', 'system', 'cost-state', 'attachment', 'api-request')
+_TYPE_RE = re.compile(r'"type"\s*:\s*"(assistant|user|system|cost-state|attachment|api-request)"')
 _SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 
 _KNOWN_TOOLS = (
@@ -151,9 +151,26 @@ def _new_call(record, message, source, agent_id, segment, line_no):
         'web_fetch_requests': _int(server_tools.get('web_fetch_requests')),
         'stop_reason': None,
         'cache_miss_reason': None,
+        'effort': None,
         'tool_calls': [],
         '_line_no': line_no,
+        '_request_ref': record.get('requestRef') if isinstance(record.get('requestRef'), str) else None,
+        '_logged_effort': _effort_name(record.get('effort')),
     }
+
+
+def _effort_name(value):
+    """An effort level as logged ("high", "xhigh", ...), or None when the value is not a short plain word."""
+    return value if isinstance(value, str) and _SAFE_ID.match(value) else None
+
+
+def _add_request(state, record):
+    """Remember the effort an api-request was sent with, keyed by the request id. Only that one setting is kept."""
+    params = record.get('params')
+    config = params.get('output_config') if isinstance(params, dict) else None
+    effort = _effort_name(config.get('effort')) if isinstance(config, dict) else None
+    if effort and isinstance(record.get('id'), str):
+        state['request_efforts'][record['id']] = effort
 
 
 def _merge_assistant(call, record, message, counters):
@@ -329,7 +346,7 @@ def parse_cost_state(record):
 def parse_file(path, source, agent_id=None, workflow_id=None):
     """Stream one log file. Return its calls, results, prompts, boundaries, and cost-states."""
     state = {'source': source, 'agent_id': agent_id, 'calls': {}, 'results': {}, 'prompts': [],
-             'boundaries': [], 'cost_states': [], 'counters': Counter(), 'cwd': None}
+             'boundaries': [], 'cost_states': [], 'counters': Counter(), 'cwd': None, 'request_efforts': {}}
     for line_no, record in iter_records(path, state['counters']):
         kind = record['type']
         if state['cwd'] is None and isinstance(record.get('cwd'), str):
@@ -342,10 +359,14 @@ def parse_file(path, source, agent_id=None, workflow_id=None):
             _add_boundary(state, record)
         elif kind == 'attachment':
             _add_attachment(state, record)
+        elif kind == 'api-request':
+            _add_request(state, record)
         elif kind == 'cost-state' and source == 'main':
             state['cost_states'].append(parse_cost_state(record))
     for call in state['calls'].values():
         call['workflow_id'] = workflow_id
+        # effort: the api-request params are the source; the assistant record's own field is the fallback
+        call['effort'] = state['request_efforts'].get(call.pop('_request_ref')) or call.pop('_logged_effort')
     return state
 
 

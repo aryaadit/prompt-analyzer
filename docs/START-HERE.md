@@ -40,20 +40,21 @@ Do these in order. Do not skip any.
 2. A new VS Code window opens on a fresh, empty copy of the task. The prompt is already on your clipboard.
    The prompt-analyzer window prints the next steps. They are the same as the steps below.
 3. In the new window, open Claude Code and start a NEW session (a fresh chat, not an old one).
-4. Check that Claude Code is on the same model as in your other runs of this task. Never switch models between runs.
+4. Type /model. Pick Sonnet 5.5, set Effort to High, leave Ultracode off. Same every run.
 5. Paste the prompt (Ctrl+V on Windows, Cmd+V on a Mac) and press Enter.
 6. Add nothing. Do not type anything else.
-7. Do not step away until it finishes. If you pause, the saved copy of the conversation expires and has
+7. If a permission prompt appears, click Yes.
+8. Do not step away until it finishes. If you pause, the saved copy of the conversation expires and has
    to be rebuilt. That changes the cost, and the run gets flagged.
-8. If it asks you a question, answer from the list the tool printed (it is also in the task's task.md). Every run
+9. If it asks you a question, answer from the list the tool printed (it is also in the task's task.md). Every run
    of a task gets the same answers.
-9. When it finishes, go back to the prompt-analyzer window and type this exact sentence:
+10. When it finishes, go back to the prompt-analyzer window and type this exact sentence:
 
        finish my run
 
-10. It prints four lines: the total, the largest cause, the most expensive step, and where the receipt is. The receipt opens
-   in your browser. If it says "Check this run", the run was flagged. Do not start it again. Tell Anna.
-11. Open results.csv in the folder prompt-analyzer-runs (in your home folder). Copy the new last row into the
+11. It prints four lines: the total, the largest cause, the most expensive step, and where the receipt is. The receipt opens
+   in your browser. If it says "Check this run", the run was flagged (for example, it used a different model or effort from the first run of the task). Do not start it again. Tell Anna.
+12. Open results.csv in the folder prompt-analyzer-runs (in your home folder). Copy the new last row into the
     shared results sheet.
 
 Keep the run folder. The blind vote needs what the agent made.
@@ -93,7 +94,8 @@ If none of those fix it: text Adit with a screenshot.
 - The same person runs both versions of a task.
 - Never reuse a run folder. Each run gets its own, and the tool will not let you reuse one.
 - Never add to the prompt. Paste it exactly as it is.
+- Never change the model or effort between runs: Sonnet 5.5, Effort High, Ultracode off, every time.
 - Do not step away during a run. Start it when you have the time to see it through.
 - Made-up inputs only. No real CVs, no personal files.
 - Type the setup and tool sentences in the prompt-analyzer window only. In a run window, type nothing except
-  the pasted prompt and the answers to the agent's questions. Anything else changes the run and its cost.
+  /model (step 4), the pasted prompt, and the answers to the agent's questions. Anything else changes the run and its cost.

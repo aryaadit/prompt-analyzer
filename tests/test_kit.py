@@ -206,8 +206,11 @@ class StartTest(KitCase):
     def test_next_steps_are_in_plain_words(self):
         _, text = self.say('start', 'sample', 'original', '--who', 'Anna')
         for phrase in ('PRACTICE TASK', 'NEW session', 'Do not add anything', 'Do not step away until it finishes',
-                       'changes the cost', 'same model as in your other runs', 'answer from this list', 'summary.md in this folder', 'finish my run'):
+                       'changes the cost', 'answer from this list', 'summary.md in this folder', 'finish my run',
+                       '2. Type /model. Pick Sonnet 5.5, set Effort to High, leave Ultracode off. Same every run.',
+                       '5. If a permission prompt appears, click Yes.'):
             self.assertIn(phrase, text)
+        self.assertNotIn('same model as in your other runs', text)
         self.assertNotIn('Traceback', text)
 
     def test_without_a_clipboard_the_prompt_is_printed_between_two_lines(self):
@@ -400,6 +403,91 @@ class FinishTest(KitCase):
         code, text = self.say('finish', 'sample-original-1')
         self.assertEqual(code, 0, text)
         self.assertNotIn('different model', text)
+
+    def finish_with_effort(self, version, effort, name=None):
+        """Start and finish a run whose log records the given effort in its api-request params (None: no record)."""
+        folder = self.start(version)
+
+        def add_requests(lines):
+            out, seen = [], set()
+            for line in lines:
+                record = json.loads(line)
+                if record['type'] == 'assistant' and effort:
+                    ref = 'req-' + record['message']['id']
+                    record['requestRef'] = ref
+                    if ref not in seen:
+                        seen.add(ref)
+                        out.append(json.dumps({'type': 'api-request', 'id': ref, 'params': {
+                            'model': 'claude-sonnet-5-5', 'output_config': {'effort': effort}}}))
+                    line = json.dumps(record)
+                out.append(line)
+            return out
+        path = self.edited_copy('%s-%s.jsonl' % (version, name or effort), add_requests)
+        self.put_session(folder, path)
+        code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        return text
+
+    def test_the_effort_of_each_run_is_recorded_in_the_results(self):
+        self.finish_with_effort('original', 'high')
+        self.finish_with_effort('lean', 'high')
+        self.assertEqual(kit.CSV_COLUMNS[kit.CSV_COLUMNS.index('model') + 1], 'effort')
+        self.assertEqual([r['effort'] for r in self.results()], ['high', 'high'])
+        self.assertEqual([r['check_this'] for r in self.results()], ['no', 'no'])
+        details = json.loads(next((self.runs / kit.DETAILS_DIR).glob('sample-lean-1.json')).read_text())
+        self.assertEqual(details['effort'], 'high')
+
+    def test_a_run_at_a_different_effort_from_the_first_run_is_flagged_in_plain_words(self):
+        first = self.finish_with_effort('original', 'high')
+        self.assertNotIn('different effort', first)
+        other = self.finish_with_effort('lean', 'medium')
+        self.assertIn('Check this run: this run used a different effort (medium) from the first run of this task '
+                      '(high), so the cost is not comparable', other)
+        self.assertNotIn('different model', other)
+        rows = self.results()
+        self.assertEqual([(r['effort'], r['check_this']) for r in rows], [('high', 'no'), ('medium', 'yes')])
+        self.assertIn('different effort', rows[1]['check_reasons'])
+
+    def test_a_different_model_and_a_different_effort_are_both_named(self):
+        self.finish_with_effort('original', 'high')
+        folder = self.start('lean')
+        path = self.edited_copy('lean-both.jsonl', lambda lines: [
+            l.replace('claude-sonnet-5-5', 'claude-opus-5-5') for l in lines])
+        self.put_session(folder, path)
+        code, text = self.say('finish')
+        self.assertEqual(code, 0, text)
+        self.assertIn('different model (claude-opus-5-5)', text)
+        self.assertIn('does not say which effort this run used', text)
+
+    def test_a_run_whose_log_has_no_effort_is_flagged_only_when_the_first_run_had_one(self):
+        self.finish_with_effort('original', None)
+        later = self.finish_with_effort('lean', 'high')
+        self.assertNotIn('effort', later.split('Total:')[0])  # the first run recorded none, so nothing to compare
+        self.assertEqual([r['effort'] for r in self.results()], ['', 'high'])
+
+    def test_a_missing_effort_in_a_later_run_is_said_plainly(self):
+        self.finish_with_effort('original', 'high')
+        later = self.finish_with_effort('lean', None)
+        self.assertIn('the log does not say which effort this run used, so I cannot confirm it matches the first '
+                      'run of this task (high)', later)
+
+    def test_refinishing_the_first_run_is_not_compared_on_effort_with_a_later_one(self):
+        self.finish_with_effort('original', 'high')
+        self.finish_with_effort('lean', 'medium')
+        code, text = self.say('finish', 'sample-original-1')
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('different effort', text)
+
+    def test_an_older_results_file_without_an_effort_column_is_upgraded_not_broken(self):
+        old = [c for c in kit.CSV_COLUMNS if c != 'effort']
+        self.runs.mkdir(parents=True, exist_ok=True)
+        with open(str(self.runs / kit.RESULTS_NAME), 'w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=old)
+            writer.writeheader()
+            writer.writerow({c: 'x' for c in old} | {'task': 'other', 'version': 'lean', 'run': '1'})
+        self.finish_with_effort('original', 'high')
+        rows = self.results()
+        self.assertEqual([(r['task'], r['effort']) for r in rows], [('other', ''), ('sample', 'high')])
 
     def test_zero_sessions_stops_with_a_plain_message(self):
         self.start('lean')
