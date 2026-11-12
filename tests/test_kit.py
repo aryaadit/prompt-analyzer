@@ -5,6 +5,7 @@ import html
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -289,13 +290,15 @@ class FinishTest(KitCase):
         _, text = self.finish_clean_run()
         est = receipt.build(SESSION_3)
         found = est['findings']['headline']
-        self.assertEqual(found['id'], 'starting_context')
+        self.assertEqual(found['id'], 'fixed_overhead')
         line = next(l for l in text.splitlines() if l.startswith('Largest cause: '))
-        self.assertIn('the starting context', line)
+        self.assertIn("Claude Code's starting context (fixed overhead, sent before any work)", line)
         self.assertIn('53% of the total (estimated)', line)
         self.assertIn(found['cause'], line)
         page = (self.runs / 'sample-lean-1.receipt.html').read_text(encoding='utf-8')
-        self.assertIn(html.escape(found['sentence'], quote=True), page)  # the page says the same thing
+        shown = re.search(r'<p class="headline">(.*?)</p>', page, re.S).group(1)
+        plain = html.unescape(re.sub(r'<[^>]+>', '', shown)).strip()
+        self.assertEqual(plain.removesuffix(' est.'), found['sentence'])  # the page says the same thing (plus its est. badge)
         self.assertNotIn('starting context', next(l for l in text.splitlines() if l.startswith('Most expensive step')))
 
     def test_with_no_headline_cause_the_line_says_so_in_words(self):

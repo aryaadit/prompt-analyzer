@@ -11,13 +11,20 @@ def money(value):
 
 
 def money_column(values):
-    """A formatter for one table column: every row gets the same number of decimals.
+    """A formatter for one table column. A true zero is "$0.00" and nothing else is, so no row hides a real amount.
 
-    Two decimals when every non-zero value is at least one cent; four otherwise, so small rows
-    stay readable and "$0.0100" never sits next to "$0.12" with a different number of decimals.
+    When every non-zero value is at least one cent, rows have two decimals. Otherwise rows have four, so small
+    amounts stay readable, and anything under $0.0001 reads "<$0.0001".
     """
-    decimals = 2 if all(v >= 0.01 for v in values if v) else 4
-    return lambda value: '$%s' % format(value, ',.%df' % decimals)
+    small = any(0 < v < 0.01 for v in values)
+
+    def one(value):
+        if not value:
+            return '$0.00'
+        if not small:
+            return money(value)
+        return '<$0.0001' if value < 0.0001 else '$%s' % format(value, ',.4f')
+    return one
 
 
 def count(value):

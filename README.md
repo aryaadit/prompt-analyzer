@@ -20,7 +20,7 @@ schedule, roles, and what is built.
 ## Status
 
 Week 1. Built and tested: the exact layer (parser, price table, plain-text summary) and the receipt
-page with its diagnosis. Open [`docs/demo-receipt.html`](docs/demo-receipt.html) to see one (made-up data, safe for slides).
+page with its diagnosis, redesigned to the standard in [`docs/DESIGN.md`](docs/DESIGN.md) (three layers, Apache ECharts charts, one colour per meaning). Open [`docs/demo-receipt.html`](docs/demo-receipt.html) to see one (made-up data, safe for slides).
 [`docs/METHOD.md`](docs/METHOD.md) explains every number on it. Also built: the teammate kit (`src/kit.py`): a setup check, a run starter and finisher,
 seven plain-English skills under `.claude/skills/`, and one practice task, so Anna and Reid can run the experiment by typing sentences in the
 Claude Code panel. Runs are saved outside the repo, in `prompt-analyzer-runs` in the home folder. Next: the experiment board, the lean prompt writer.
@@ -45,6 +45,7 @@ python3 -m src.kit check                                # is this laptop ready? 
 python3 -m src.kit start <task> <original|lean> [--run N] [--who NAME]   # fresh run folder, prompt on the clipboard, new VS Code window
 python3 -m src.kit finish [<run folder name>]           # receipt, one results.csv row, a flag if the run needs a second look
 python3 -m src.kit receipt [latest | <run folder name>] # open a run's receipt
+python3 -m src.kit prompt [latest | <run folder name>]  # put a run's prompt back on the clipboard and print it
 python3 -m src.kit runs                                 # table of runs so far
 python3 -m src.kit update                               # git pull --ff-only, and stops if you changed anything
 ```
@@ -65,11 +66,12 @@ receipt shows the transcript total only and says so.
 | `docs/GAME-PLAN.md` | The project plan: goal, schedule, roles. Read first |
 | `docs/PLAN.md` | Timeline, experiment design, risks, open questions |
 | `docs/SCHEMA.md` | How Claude Code session logs are structured |
+| `vendor/` | Apache ECharts 6.1.0, the one approved dependency, with its version, source, SHA-256, and license. Inlined into every page |
 | `docs/METHOD.md` | How each number on the receipt is produced: exact, estimated, and known weaknesses |
 | `docs/demo-receipt.html` | A receipt built from made-up data. Open it in a browser. Safe to share |
 | `docs/AI-USAGE.md` | Running note of how we used AI (course policy) |
 | `prompts/` | The prompts we give the coding agent, in order |
-| `src/` | Parser, price table, the estimated layer, the receipt page, summary, audit, the teammate kit `kit.py` (rematch runner later) |
+| `src/` | Parser, price table, the estimated layer, the receipt page and its shared parts `page.py`, summary, audit, the teammate kit `kit.py` (rematch runner later) |
 | `tests/` | Unit tests, with synthetic fixtures under `tests/fixtures/` |
 | `skill/` | The packaged skill (later) |
 | `experiments/tasks/<task>/` | One task: `task.md`, `start/` (made-up starting files), `prompt-original.md`, `prompt-lean.md`. `sample` is a practice task |

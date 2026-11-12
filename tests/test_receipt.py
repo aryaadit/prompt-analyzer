@@ -56,8 +56,11 @@ class PageStructureTest(RenderCase):
             parsed = page_of(text)
             self.assertGreater(parsed.starts, 50, name)
             self.assertTrue(text.startswith('<!DOCTYPE html>'))
-            positions = [text.index(h) for h in ('<h1>', 'class="tiles"', 'Where the money went', 'The three most expensive steps',
-                                                 'How the conversation grew', 'Every step', '<h2>Files</h2>', 'Other findings', 'Fine print')]
+            positions = [text.index(h) for h in ('<h1>', 'class="headline"', 'class="tiles"', 'Where did the money go?',
+                                                 'What made it expensive?', 'How did the conversation grow?',
+                                                 'Where did the cost pile up over time?', 'What happened at every step?',
+                                                 'Which files did it touch?', 'What else stood out?', 'How do I read this page?',
+                                                 'What is in the fine print?')]
             self.assertEqual(positions, sorted(positions), name)
 
     def test_nothing_points_off_the_page(self):
@@ -72,10 +75,12 @@ class PageStructureTest(RenderCase):
             self.assertNotIn('@import', text)
             self.assertNotIn('url(http', text)
 
-    def test_one_script_block_and_it_is_inline(self):
+    def test_every_script_block_is_inline_and_blocks_are_balanced(self):
         for name, (est, text) in self.pages.items():
-            self.assertEqual(text.count('<script'), 1, name)  # only our own block; injected names are escaped
-            self.assertEqual(text.count('</script>'), 1, name)
+            self.assertEqual(text.count('<script'), text.count('</script>'), name)
+            self.assertNotIn('<script src', text)
+            self.assertIn('id="page-data"', text)
+            self.assertEqual(text.count('<script>'), 2, name)  # the chart library, and our own script
 
     def test_every_number_group_carries_an_exact_or_est_word(self):
         text = self.pages['demo'][1]
@@ -108,11 +113,9 @@ class PageStructureTest(RenderCase):
         self.assertIn('Cache rebuilt', text)
         self.assertIn('result 36,000 characters (exact)', text)
 
-    def test_growth_chart_marks_the_rebuild(self):
+    def test_the_rebuild_is_in_the_step_detail_with_its_reason(self):
         est, text = self.pages['demo']
-        self.assertEqual(text.count('<title>Cache rebuilt after 25 minutes</title>'), 1)  # one marker on the chart
-        self.assertIn('Cache rebuilt after 25 minutes (previous_message_not_found)', text)  # and the reason in the step detail
-        self.assertEqual(text.count('<g><title>Call '), 36)
+        self.assertIn('Cache rebuilt after 25 minutes (previous_message_not_found)', text)
 
     def test_gap_notes(self):
         self.assertIn('higher than this transcript total', self.pages['s1'][1])  # the fixture has a large gap
@@ -275,7 +278,7 @@ class ThousandStepsTest(unittest.TestCase):
         self.assertLessEqual(est['sum_back']['difference_usd'], 1e-6)
         self.assertEqual(text.count('<tr class="step"'), 1200)
         self.assertIn('data-limit="50"', text)
-        self.assertIn('Show all 1200 steps', text)
+        self.assertIn('Show all 1,200 steps', text)
         self.assertLess(len(text), 6_000_000)
 
 

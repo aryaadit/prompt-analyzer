@@ -15,6 +15,7 @@ from .fmt import count, minutes, money, percent
 TOP_STEPS = 3
 MAX_PAUSES_LISTED = 5
 STARTING_CONTEXT_MIN_SHARE = 0.10
+FIXED_OVERHEAD_MIN_SHARE = 0.50  # above this, the starting context is called fixed overhead in the headline
 RESENT_MIN_SHARE = 0.30
 REPEATED_READ_MIN = 3
 
@@ -208,7 +209,11 @@ def _cache_rebuilds(estimate):
 
 
 def _headline(estimate, cards, session_findings):
-    """One plain sentence: the single largest cause, taken from the findings above."""
+    """One plain sentence: the single largest cause, taken from the findings above.
+
+    When the starting context is more than half of the total, the sentence says so plainly (fixed overhead) and
+    gives the cost of the task itself: the total minus the starting context.
+    """
     total = estimate['totals']['transcript_usd']
     if not total:
         return None
@@ -228,6 +233,15 @@ def _headline(estimate, cards, session_findings):
         options.append((found['extra_usd'], 'cache_rebuilds', 'the saved copy of the conversation expiring %d time%s, '
                         'which cost %s more than re-sending would have' % (
                             found['count'], '' if found['count'] == 1 else 's', money(found['extra_usd']))))
+    overhead = by_id.get('starting_context_share')
+    if overhead and overhead['numbers']['usd'] / total > FIXED_OVERHEAD_MIN_SHARE:
+        start_usd = overhead['numbers']['usd']
+        share = start_usd / total
+        task_usd = max(total - start_usd, 0.0)
+        return {'id': 'fixed_overhead', 'cause': "Claude Code's starting context (fixed overhead, sent before any work)",
+                'numbers': {'usd': start_usd, 'share': share, 'task_usd': task_usd}, 'sentence': (
+                    "Most of this cost was fixed overhead: Claude Code's starting context, sent before any work. "
+                    "The task itself cost %s." % money(task_usd))}
     if not options:
         return None
     usd, cause, text = max(options, key=lambda option: option[0])

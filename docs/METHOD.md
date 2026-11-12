@@ -2,7 +2,8 @@
 
 One page, in plain words. Every number on the receipt page is produced as described here.
 Code: `src/parse.py` (read the log), `src/prices.py` (dollars), `src/estimate.py` (the split),
-`src/diagnose.py` (the sentences), `src/receipt.py` (the page).
+`src/diagnose.py` (the sentences), `src/receipt.py` (the page), `src/page.py` (parts every page shares: colours,
+formats, badges, hover text, collapsible sections, CSV, print styles, the chart library).
 
 ## The one rule
 
@@ -12,6 +13,27 @@ total is **split between steps**. The split always adds back up to the total, an
 on every build. If it does not add up (more than one millionth of a dollar off), no page is built.
 
 Dollars are **API-equivalent**: tokens times public prices. On a subscription nobody is billed this amount.
+
+## How the page is laid out
+
+The page follows docs/DESIGN.md, in three layers. Nothing was dropped when the page was redesigned: detail moved down a layer.
+
+1. **The answer**, above the fold at 1280 by 800: the title line, the headline sentence (the single largest cause), four tiles
+   (total, model calls, share re-sent, extra dollars from cache rebuilds), and one chart of where the money went with its legend
+   table, its total row, and the check against the total at the top. A fifth tile, "Cost of the task itself" (the total minus the
+   starting context), appears only when the starting context is more than half of the total. Then the headline says: "Most of this
+   cost was fixed overhead: Claude Code's starting context, sent before any work. The task itself cost $X."
+   The same rule gives the "Largest cause" line that `kit finish` prints.
+2. **The explanation**: the top three cards, a bar chart of how the prompt grew (one bar per call, with a tooltip of exact tokens
+   by type), and a line of the running total in dollars with the top steps marked on it.
+3. **The evidence**, in sections that open and close: every step (search, sort, filter, top 50 then show all), the files, other
+   findings, how to read the page with a glossary, and the fine print. Every table has a CSV button. Print and PDF expand them.
+
+One colour per meaning, set once in `src/page.py`: 13 hues and 2 greys, picked so every pair stays at least 15 apart (CIE Lab) under
+normal vision and protan, deutan, and tritan simulation. Blue is re-sent, red-orange is new, indigo is output, ochre is subagent
+work, and the twelve kinds of work keep their own colours. Colour is never the only cue. A true zero is "$0.00" and nothing else is:
+anything under a cent reads "<$0.01" (or "<$0.0001" in the four-decimal tables). The chart library is Apache ECharts, inlined from
+`vendor/echarts.min.js` and checked against the SHA-256 in `vendor/README.md` on every build. A page makes no network request.
 
 ## What is exact
 

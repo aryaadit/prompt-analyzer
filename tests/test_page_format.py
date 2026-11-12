@@ -1,6 +1,8 @@
 """Tests for the page's number formats, print rules, headline, chart, and total row."""
-import io
 import contextlib
+import html
+import io
+import json
 import re
 import tempfile
 import unittest
@@ -24,10 +26,22 @@ class FormatTest(unittest.TestCase):
 
     def test_a_column_uses_one_number_of_decimals(self):
         mixed = fmt.money_column([0.0063, 0.1155, 0.01, 0])
-        self.assertEqual([mixed(v) for v in (0.0063, 0.1155, 0.01, 0)], ['$0.0063', '$0.1155', '$0.0100', '$0.0000'])
+        self.assertEqual([mixed(v) for v in (0.0063, 0.1155, 0.01)], ['$0.0063', '$0.1155', '$0.0100'])
+        self.assertEqual(len({len(mixed(v).split('.')[1]) for v in (0.0063, 0.1155, 0.01)}), 1)
         cents = fmt.money_column([0.02, 0.1155, 3.0])
         self.assertEqual([cents(v) for v in (0.02, 0.1155, 3.0)], ['$0.02', '$0.12', '$3.00'])
-        self.assertEqual(len({len(mixed(v).split('.')[1]) for v in (0.0063, 0.1155, 0.01, 0)}), 1)
+
+    def test_zero_is_written_only_for_a_true_zero_everywhere(self):
+        small = fmt.money_column([0.0000237, 0.0009, 0.12, 0])
+        self.assertEqual(small(0), '$0.00')
+        self.assertEqual(small(0.0000237), '<$0.0001')  # a real amount is never shown as zero
+        self.assertEqual(small(0.0009), '$0.0009')
+        two = fmt.money_column([0.5, 0])
+        self.assertEqual((two(0), two(0.5)), ('$0.00', '$0.50'))
+        self.assertEqual((fmt.money(0), fmt.money(0.0000237), fmt.money(0.004)), ('$0.00', '<$0.01', '<$0.01'))
+        for value in (0.0000001, 0.0001, 0.004, 0.0099):
+            for formatted in (fmt.money(value), small(value)):
+                self.assertNotIn(formatted, ('$0.00', '$0.0000'), value)
 
     def test_axis_labels(self):
         self.assertEqual([fmt.short_tokens(v) for v in (950, 25000, 100000, 1200000)], ['950', '25k', '100k', '1.2M'])
@@ -48,39 +62,45 @@ class PageCase(unittest.TestCase):
 
     @staticmethod
     def section(text, title):
-        start = text.index('<h2>%s</h2>' % title)
+        start = text.index('>%s</h2>' % title)
         return text[start:text.index('</section>', start)]
+
+    @staticmethod
+    def main_part(text):
+        """The page's own markup: everything before the library and the data blocks."""
+        return text[:text.index('<div id="tip"')]
 
 
 class NumberFormatOnThePageTest(PageCase):
     def test_tiles_legend_and_cards_use_two_decimals_only(self):
         for name, (est, text) in self.pages.items():
             tiles = text[text.index('class="tiles"'):text.index('</section>', text.index('class="tiles"'))]
-            for part in (tiles, self.section(text, 'Where the money went'), self.section(text, 'The three most expensive steps')):
+            for part in (tiles, self.section(text, 'Where did the money go?'), self.section(text, 'What made it expensive?')):
                 for amount in DOLLARS.findall(part):
                     self.assertEqual(len(amount.split('.')[1]), 2, (name, amount))
 
     def test_amounts_under_a_cent_read_less_than_one_cent(self):
         est, text = self.pages['demo']
-        legend = self.section(text, 'Where the money went')
+        legend = self.section(text, 'Where did the money go?')
         self.assertIn('&lt;$0.01', legend)  # escaped, so it is valid HTML
         self.assertIn('&lt;0.1%', legend)  # "Your prompts" are under 0.1 percent of the demo
-        self.assertNotIn('<$', text)
-        self.assertNotIn('><0.1%', text)
+        self.assertNotIn('<$', self.main_part(text))
+        self.assertNotIn('><0.1%', self.main_part(text))
         self.assertNotRegex(legend, r'\$0\.00\d')
 
     def test_every_row_of_a_table_column_has_the_same_decimals(self):
         for name, (est, text) in self.pages.items():
             steps = text[text.index('<tbody id="stepbody"'):text.index('</tbody>')]
             totals = re.findall(r'<td class="r">(\$[\d,]+\.\d+|no public price)</td></tr>', steps)
-            self.assertEqual(len({len(t.split('.')[1]) for t in totals if t.startswith('$')}), 1, name)
+            self.assertLessEqual(len({len(t.split('.')[1]) for t in totals if t.startswith('$') and t != '$0.00'}), 1, name)
         est, text = self.pages['demo']
         steps = text[text.index('<tbody id="stepbody"'):text.index('</tbody>')]
         decimals = [len(d) for d in re.findall(r'<td class="r">\$[\d,]+\.(\d+)</td></tr>', steps)]
         self.assertEqual(len(decimals), 36)
         self.assertEqual(set(decimals), {4})  # the demo's steps are mostly under a dime, so the column uses four
         files = text[text.index('id="filetable"'):text.index('</tbody>', text.index('id="filetable"'))]
-        decimals = {len(d) for d in re.findall(r'<td class="r">\$[\d,]+\.(\d+)</td>', files)}
+        cells = re.findall(r'<td class="r">(\$[\d,]+\.\d+|<\$0\.0001)</td>', files)
+        decimals = {len(c.split('.')[1]) for c in cells if c.startswith('$') and c != '$0.00'}  # a true zero is always $0.00
         self.assertEqual(len(decimals), 1)
 
     def test_numbers_in_a_money_column_are_right_aligned(self):
@@ -114,25 +134,33 @@ class PrintTest(PageCase):
         self.assertGreaterEqual(text.count('<svg class="sw"'), 14)
         self.assertGreaterEqual(text.count('<svg class="chip"'), 36)
         self.assertGreaterEqual(text.count('<svg class="costbar"'), 36 + 3)
-        self.assertEqual(text.count('<svg class="mk"'), 4)  # the growth chart's legend markers are drawn too
+        self.assertEqual(text.count('<svg class="mk"'), 0)  # the growth chart is ECharts now; its legend is drawn by the chart
 
     def test_the_legend_and_its_total_row_stay_together(self):
         text = self.pages['demo'][1]
-        keep = text[text.index('<div class="keep"><svg class="kindbar"'):]
-        keep = keep[:keep.index('</div></section>')]
+        keep = text[text.index('<div class="keep" id="kindtable">'):]
+        keep = keep[:keep.index('</section>')]
         self.assertIn('class="totalrow"', keep)
         self.assertIn('Each line is rounded', keep)
-        self.assertIn('.keepsec{break-inside:avoid', receipt.CSS)
+        self.assertIn('Matches the total at the top', keep)
 
 
 class HeadlineTest(PageCase):
-    def test_one_headline_sentence_sits_under_the_tiles(self):
+    @staticmethod
+    def headline_text(text):
+        """The headline sentence as plain text (tags removed, entities decoded)."""
+        found = re.search(r'<p class="headline">(.*?)</p>', text, re.S).group(1)
+        return html.unescape(re.sub(r'<[^>]+>', '', found)).strip()
+
+    def test_one_headline_sentence_sits_above_the_tiles(self):
         est, text = self.pages['demo']
         found = est['findings']['headline']
         self.assertEqual(found['id'], 'repeated_step')
         self.assertEqual(found['sentence'], 'The largest single cause: Read inventory.py 3 times, $0.32 in all, 37% of the total (est.).')
-        self.assertLess(text.index('class="tiles"'), text.index('class="headline"'))
-        self.assertLess(text.index('class="headline"'), text.index('Where the money went'))
+        self.assertEqual(self.headline_text(text), found['sentence'])
+        self.assertLess(text.index('<h1>'), text.index('class="headline"'))
+        self.assertLess(text.index('class="headline"'), text.index('class="tiles"'))
+        self.assertLess(text.index('class="tiles"'), text.index('Where did the money go?'))
         self.assertEqual(text.count('class="headline"'), 1)
 
     def test_the_headline_picks_the_largest_cause_among_the_findings(self):
@@ -145,36 +173,120 @@ class HeadlineTest(PageCase):
         self.assertEqual(diagnose._headline(est, cards, [])['id'], 'top_step')
         self.assertIsNone(diagnose._headline({'totals': {'transcript_usd': 0}}, cards, []))
 
+    def test_when_the_starting_context_is_over_half_the_headline_says_it_is_fixed_overhead(self):
+        est = {'totals': {'transcript_usd': 10.0}}
+        cards = [{'times': 1, 'number': 4, 'description': 'Ran make', 'total_usd': 1.0}]
+        half = {'id': 'starting_context_share', 'numbers': {'usd': 5.0}}
+        over = {'id': 'starting_context_share', 'numbers': {'usd': 6.5}}
+        self.assertNotEqual(diagnose._headline(est, cards, [half])['id'], 'fixed_overhead')  # exactly half is not over half
+        found = diagnose._headline(est, cards, [over])
+        self.assertEqual(found['id'], 'fixed_overhead')
+        self.assertEqual(found['sentence'], "Most of this cost was fixed overhead: Claude Code's starting context, sent before any "
+                                            "work. The task itself cost $3.50.")
+        self.assertAlmostEqual(found['numbers']['task_usd'], 3.5)
+
+    def test_a_fifth_tile_shows_the_cost_of_the_task_itself_only_in_that_case(self):
+        est, text = self.pages['s3']  # the starting context is 53 percent of this fixture
+        found = est['findings']['headline']
+        self.assertEqual(found['id'], 'fixed_overhead')
+        self.assertTrue(self.headline_text(text).startswith("Most of this cost was fixed overhead: Claude Code's starting context"))
+        self.assertIn('Cost of the task itself', text)
+        self.assertIn('class="tiles" style="--n:5"', text)
+        start = [r for r in est['kinds'] if r['key'] == 'start'][0]['usd']
+        self.assertAlmostEqual(found['numbers']['task_usd'], est['totals']['transcript_usd'] - start)
+        self.assertEqual(receipt.task_cost(est), found['numbers']['task_usd'])
+        demo = self.pages['demo']
+        self.assertNotIn('Cost of the task itself', demo[1])
+        self.assertIn('class="tiles" style="--n:4"', demo[1])
+        self.assertIsNone(receipt.task_cost(demo[0]))
+
+    def test_every_tile_label_stays_on_one_line(self):
+        for name, (est, text) in self.pages.items():
+            tiles = text[text.index('class="tiles"'):text.index('</section>', text.index('class="tiles"'))]
+            labels = re.findall(r'<span class="t">(.*?)</span>(?=<span class="tag|<span class="tag)', tiles)
+            self.assertGreaterEqual(len(re.findall(r'class="lbl"', tiles)), 4, name)
+        self.assertIn('.lbl .t{white-space:nowrap}', receipt.CSS)
+
     def test_every_fixture_page_builds_with_or_without_a_headline(self):
         for name in ('s1', 's2', 's3'):
-            self.assertIn('Where the money went', self.pages[name][1])
+            self.assertIn('Where did the money go?', self.pages[name][1])
 
 
 class GrowthChartTest(PageCase):
-    def test_taller_with_readable_axes_and_drawn_markers(self):
-        est, text = self.pages['demo']
-        chart = text[text.index('<svg class="growth"'):text.index('</svg>', text.index('<svg class="growth"'))]
-        self.assertGreaterEqual(int(re.search(r'viewBox="0 0 1000 (\d+)"', chart).group(1)), 360)
-        labels = re.findall(r'<text[^>]*font-size="(\d+)"[^>]*>([^<]*)</text>', chart)
-        self.assertTrue(all(int(size) >= 13 for size, _ in labels))
-        words = [w for _, w in labels]
-        for expected in ('0', '25k', '50k', '75k', '100k', '1', '36', 'Model call, in order', 'Tokens in the prompt'):
-            self.assertIn(expected, words)
-        self.assertIn('Cache rebuilt after 25 minutes', chart)
-        self.assertEqual(chart.count('<g><title>Call '), 36)
+    @staticmethod
+    def data(text):
+        raw = re.search(r'<script type="application/json" id="page-data">(.*?)</script>', text, re.S).group(1)
+        return json.loads(raw)
 
-    def test_ticks_are_round_and_labels_are_few(self):
-        self.assertEqual(receipt._nice_ceiling(98140), 100000)
-        self.assertEqual(receipt._nice_ceiling(21000), 25000)
-        self.assertEqual(receipt._nice_ceiling(147573), 200000)
-        self.assertLessEqual(len(receipt._x_ticks(6578)), 9)
-        self.assertEqual(receipt._x_ticks(36)[0], 1)
-        self.assertIn(36, receipt._x_ticks(36))
-        self.assertEqual(receipt._x_ticks(1), [1])
+    def test_the_growth_chart_has_a_statement_title_axis_labels_one_bar_per_call_and_markers(self):
+        est, text = self.pages['demo']
+        option = self.data(text)['charts']['chart-growth']
+        self.assertEqual(option['title']['text'], 'Prompt size grew 5x over the session')
+        self.assertEqual(option['xAxis']['name'], 'Model call, in order')
+        self.assertEqual(option['yAxis']['name'], 'Tokens in the prompt')
+        names = [s['name'] for s in option['series']]
+        self.assertEqual(names, ['Re-sent', 'New', 'Cache rebuilt'])
+        self.assertEqual(len(option['series'][0]['data']), 36)
+        self.assertEqual(len(option['series'][2]['data']), 1)  # one rebuild in the demo
+        self.assertEqual(option['dataZoom'], [])  # a short session needs no zoom
+        self.assertEqual([c['prompt_tokens'] for c in est['calls']],
+                         [a + b for a, b in zip(option['series'][0]['data'], option['series'][1]['data'])])
+
+    def test_the_tooltip_data_holds_exact_tokens_by_type_for_every_call(self):
+        est, text = self.pages['demo']
+        growth = self.data(text)['growth']
+        self.assertEqual(len(growth['calls']), 36)
+        first = est['calls'][0]['tokens']
+        self.assertEqual(growth['calls'][0][:5], [first['input'], first['cache_read'], first['cache_write_5m'],
+                                                  first['cache_write_1h'], first['output']])
+        self.assertEqual(len(growth['rebuilds']), 1)
+        self.assertAlmostEqual(list(growth['rebuilds'].values())[0][0], 25, delta=1)
+        self.assertEqual(list(growth['rebuilds'].values())[0][1], 'previous_message_not_found')
+        self.assertIn('Cache rebuilt after 25 minutes (previous_message_not_found)', text)  # and the reason in the step detail
+
+    def test_the_chart_has_a_text_summary_with_its_numbers_so_the_page_reads_without_it(self):
+        est, text = self.pages['demo']
+        summary = re.search(r'id="chart-growth".*?<p class="chartsum">(.*?)</p>', text, re.S).group(1)
+        self.assertIn('21,044 tokens on the first call and 98,140 on the last', summary)
+        self.assertIn('the largest was 98,140 tokens', summary)
+        self.assertIn('The saved copy expired 1 time', summary)
+
+    def test_a_long_session_gets_zoom_and_a_compaction_marker_when_the_log_has_one(self):
+        self.assertEqual(receipt._zoom(40), ([], 0))
+        controls, room = receipt._zoom(41)
+        self.assertEqual([c['type'] for c in controls], ['inside', 'slider'])
+        self.assertGreater(room, 0)
+        est = self.pages['s1'][0]  # an invented session with a compaction
+        option = receipt.growth_option(est)
+        if len(est['segments']) > 1:
+            self.assertIn('Compacted', [s['name'] for s in option['series']])
+
+    def test_statements_say_what_happened(self):
+        calls = lambda *sizes: [{'prompt_tokens': s} for s in sizes]
+        self.assertEqual(receipt._growth_statement(calls(1000, 5000)), 'Prompt size grew 5x over the session')
+        self.assertEqual(receipt._growth_statement(calls(1000, 1300)), 'Prompt size grew 30% over the session')
+        self.assertEqual(receipt._growth_statement(calls(1000, 1010)), 'Prompt size stayed about the same over the session')
+        self.assertIn('one call', receipt._growth_statement(calls(1234)))
+        self.assertEqual(receipt._running_statement([0.1, 0.2, 0.6, 1.0]), 'Half of the cost was spent by call 3 of 4')
+
+
+class RunningTotalChartTest(PageCase):
+    def test_the_line_ends_at_the_total_and_marks_the_top_steps(self):
+        est, text = self.pages['demo']
+        option = GrowthChartTest.data(text)['charts']['chart-running']
+        line = option['series'][0]
+        self.assertEqual(len(line['data']), 36)
+        self.assertAlmostEqual(line['data'][-1], est['totals']['transcript_usd'], places=6)
+        self.assertEqual(line['data'], sorted(line['data']))  # a running total never goes down
+        ranks = sorted(p['value'] for p in line['markPoint']['data'])
+        expected = sorted(rank for rank, card in enumerate(est['findings']['top_steps'], 1) for _ in card['steps'])
+        self.assertEqual(ranks, expected)
+        self.assertEqual(option['yAxis']['name'], 'Dollars so far, API-equivalent')
+        self.assertTrue(option['title']['text'].startswith('Half of the cost was spent by call'))
 
 
 class TotalRowTest(PageCase):
-    ROW = re.compile(r'<tr class="totalrow"><td></td><td>([^<]*)</td><td class="r">([^<]*)</td><td class="r">([^<]*)</td>'
+    ROW = re.compile(r'<tr class="totalrow"><td>([^<]*)</td><td class="r">([^<]*)</td><td class="r">([^<]*)</td>'
                      r'<td class="check">(.*?)</td></tr>')
 
     def test_the_total_row_equals_the_headline_total_on_every_fixture_and_the_demo(self):
@@ -184,7 +296,7 @@ class TotalRowTest(PageCase):
             self.assertEqual(share, '100%')
             self.assertIn('Matches the total at the top', check)
             self.assertNotIn('Does not match', text)
-            headline = re.search(r'Total at public API prices: <b>([^<]*)</b>', text).group(1)
+            headline = re.search(r'<div class="num">([^<]*)</div>', text).group(1)  # the first tile is the total
             self.assertEqual(total, headline, name)
             self.assertEqual(total, receipt.money(est['totals']['transcript_usd']))  # the page's HTML-safe form
             self.assertLessEqual(abs(sum(r['usd'] for r in est['kinds']) - est['totals']['transcript_usd']), 1e-6)
@@ -196,15 +308,14 @@ class TotalRowTest(PageCase):
         rounded = sum(round(v, 2) for v in lines)
         self.assertNotEqual(round(rounded, 2), round(sum(lines), 2) + 1)  # rounding each line is not how the total is made
 
-    def test_the_row_sits_in_the_legend_table_under_a_rule(self):
+    def test_the_row_sits_under_the_legend_lines_with_a_rule_above_it(self):
         est, text = self.pages['demo']
-        table = text[text.index('<table class="legend kindlegend">'):text.index('</table>', text.index('<table class="legend kindlegend">'))]
-        self.assertTrue(table.rstrip().endswith('</tr>'))
+        table = text[text.index('<table class="legend totaltable">'):text.index('</table>', text.index('<table class="legend totaltable">'))]
         self.assertEqual(table.count('class="totalrow"'), 1)
-        self.assertLess(table.index('Harness text'), table.index('class="totalrow"'))
-        self.assertIn('tr.totalrow td{border-top:2px solid', receipt.CSS)
+        self.assertLess(text.index('Harness text'), text.index('class="totalrow"'))
+        self.assertIn('.totaltable{margin-top:8px;border-top:2px solid', receipt.CSS)
         self.assertIn('Each line is rounded, so the lines may not add up to the last cent. The total is the exact sum.', text)
-        self.assertIn('.small{color:#6b7078', receipt.CSS)
+        self.assertIn('.small{color:var(--muted)', receipt.CSS)
 
     def test_a_mismatch_is_shown_in_red_with_both_numbers(self):
         est = receipt.build(SESSION_1)
@@ -217,7 +328,8 @@ class TotalRowTest(PageCase):
         self.assertIn('$%.6f' % (total + 0.01), check)
         self.assertIn('$%.6f' % total, check)
         self.assertNotIn('Matches the total at the top', text)
-        self.assertIn('.nomatch{color:#b3261e', receipt.CSS)
+        self.assertIn('.nomatch{color:var(--bad)', receipt.CSS)
+        self.assertIn('--bad:#b3261e', receipt.CSS)
 
     def test_a_tiny_difference_within_the_tolerance_still_matches(self):
         est = receipt.build(SESSION_1)

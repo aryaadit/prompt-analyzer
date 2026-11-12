@@ -585,12 +585,13 @@ def build_estimate(session):
 
 
 def _call_row(call):
-    """The exact per-call numbers the growth chart needs."""
+    """The exact per-call numbers the charts need: tokens by type and the call's dollars (None: no public price)."""
     tokens = call['tokens']
     return {'order': call['order'], 'segment': call['segment'], 'timestamp': call['timestamp'],
             'resent_tokens': tokens['cache_read'],
             'new_tokens': tokens['input'] + tokens['cache_write_5m'] + tokens['cache_write_1h'],
-            'prompt_tokens': prices.prompt_size(tokens)}
+            'prompt_tokens': prices.prompt_size(tokens), 'usd': call['usd'],
+            'tokens': {key: tokens[key] for key in ('input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output')}}
 
 
 def _bash_stats(calls):

@@ -44,7 +44,11 @@ Every page has three layers, in this order.
 ## Look
 
 - One color per kind of work, the same on every page and every chart. Color-blind safe.
-  The palette lives in one place in the code.
+  The palette lives in one place in the code (`src/page.py`), and one color means one thing on the whole
+  page: blue is re-sent, red-orange is new, indigo is output, ochre is subagent work. A test checks that no
+  two meanings share a color and that no color outside the palette appears on a page.
+- A true zero is "$0.00". Anything above zero and under a cent is "<$0.01". The same everywhere.
+- A tile label never wraps in the middle of a phrase at 1,280 px wide.
 - Light background, generous white space, an 8 px spacing grid, at most two font weights.
 - System font stack. No web fonts.
 - Large type on totals and tiles, so a screenshot works on a slide.

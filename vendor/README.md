@@ -21,7 +21,7 @@ Checked on download: the tarball matched the npm integrity value above, and the 
 To update: download the new release, replace the file, change the version, source, integrity, and SHA-256 here in
 the same commit, and run the tests.
 
-The file contains three URL strings, all XML namespace identifiers for SVG (not requests). It makes no network calls.
+The file contains six URL strings: four XML namespace names (SVG, XLink, XML, XMLNS) and two license links in comments. None is a request. It calls no network API (no fetch, XMLHttpRequest, WebSocket, or beacon); `tests/test_page.py` checks this.
 
 ## License text
 

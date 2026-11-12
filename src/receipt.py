@@ -4,12 +4,14 @@
                            [--json [path]] [--no-open]
     python3 -m src.receipt --demo [--no-open]
 
-The page has inline CSS, inline SVG, and a little inline JavaScript (sort, filter, expand). It loads
-nothing from the network and works offline by double-click. Every string that came from a log is
-HTML-escaped. The page holds no prompt text, no file contents, and no tool output.
+The page follows docs/DESIGN.md and is built from src/page.py. Three layers: the answer (headline, tiles, where the
+money went), the explanation (the costliest steps, how the conversation grew, how the cost piled up), and the
+evidence (every step, every file, the findings, how to read the page, the fine print), collapsed until opened.
+
+It loads nothing from the network and works offline by double-click. Apache ECharts is inlined from vendor/.
+Every string that came from a log is HTML-escaped. The page holds no prompt text, no file contents, and no tool output.
 """
 import argparse
-import html
 import json
 import os
 import sys
@@ -18,48 +20,18 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import estimate, fmt, parse, paths, prices
-from .fmt import count, minutes, short_tokens
+from . import estimate, fmt, page, parse, paths, prices
+from .fmt import count, minutes
+from .page import (COST_COLORS, INK, KIND_COLORS, MARK_COLORS, CSS, Page, chip, collapsible, contrast_ink, esc, money,
+                   money_column, percent, section, swatch, tag)
 from .summarize import REPO_ROOT
 
-# One colour per kind, the same in the bar, the cards, and the rows (Paul Tol's "muted" set, which
-# stays distinguishable for the common kinds of colour blindness). Colour is never the only cue.
-KIND_COLORS = {
-    'start': '#88CCEE', 'prompt': '#332288', 'thinking': '#AA4499', 'answer': '#CC6677',
-    'read_file': '#117733', 'search': '#DDCC77', 'run_command': '#882255', 'write_edit': '#44AA99',
-    'web': '#999933', 'subagent': '#E69F00', 'other_tool': '#888888', 'harness': '#CCCCCC',
-}
-COST_COLORS = {'output': '#1B2A49', 'new': '#0077BB', 'carried': '#99DDFF', 'subagent': '#EE7733'}
 TOP_ROWS = 50
 TOP_FILES = 25
-
-E = html.escape
-
-
-def esc(value):
-    """HTML-escape any string that came from a log."""
-    return E(str(value), quote=True)
-
-
-def money(value):
-    """Dollars for the page (two decimals, "<$0.01" under a cent), safe to put in HTML."""
-    return esc(fmt.money(value))
-
-
-def percent(share):
-    """A share for the page ("<0.1%" under a tenth of a percent), safe to put in HTML."""
-    return esc(fmt.percent(share))
-
-
-def money_column(values):
-    """A formatter that gives every row of one table column the same number of decimals."""
-    inner = fmt.money_column(values)
-    return lambda value: esc(inner(value))
-
-
-def tag(kind):
-    """The word that goes with every number: exact, or est."""
-    return '<span class="tag %s">%s</span>' % (kind, 'exact' if kind == 'exact' else 'est.')
+ZOOM_FROM = 40  # sessions with more calls than this get zoom on the two call-by-call charts
+SHORT_KIND = {'start': 'Starting context', 'prompt': 'Prompts', 'thinking': 'Thinking', 'answer': 'Answers',
+              'read_file': 'Reading', 'search': 'Searching', 'run_command': 'Commands', 'write_edit': 'Writing',
+              'web': 'Web', 'subagent': 'Subagents', 'other_tool': 'Other tools', 'harness': 'Harness'}
 
 
 def num(value, kind):
@@ -93,38 +65,20 @@ def when(stamp):
 
 def duration(seconds):
     """How long the session ran, in plain words."""
+    if seconds < 1:
+        return 'under a second'
     if seconds < 60:
-        return 'under a minute'
+        return '%d s' % round(seconds)
     hours, mins = divmod(int(seconds // 60), 60)
     return '%d h %d min' % (hours, mins) if hours else '%d min' % mins
 
 
-# ---------------------------------------------------------------- page pieces
+def rate(value):
+    """A price per million tokens with at least two decimals: $2.00, $0.125."""
+    return ('$%.2f' % value) if round(value, 2) == value else ('$%.3f' % value)
 
-def _top(est):
-    """Title, one sentence, the API-equivalent note, and the gap note when it is above 2 percent."""
-    facts, totals = est['session'], est['totals']
-    recorded = est['recorded_total']
-    lines = ['<h1>%s</h1>' % esc(facts['project']),
-             '<p class="sub">%s &middot; ran %s &middot; %s</p>' % (
-                 esc(when(facts['started'])), esc(duration(facts['duration_seconds'])),
-                 esc(', '.join(facts['models'])))]
-    lines.append('<p class="lede">%s model calls and %s tool calls. Total at public API prices: <b>%s</b> %s.</p>' % (
-        count(facts['calls']), count(facts['tool_calls']), money(totals['transcript_usd']), tag('exact')))
-    lines.append('<p class="note">Dollars on this page are <b>API-equivalent</b>: tokens times public API prices. '
-                 'On a subscription nobody is billed this amount.</p>')
-    if est['models_without_public_price']:
-        lines.append('<p class="warn">%s of %s calls use a model with no public price (%s). Their tokens are shown; '
-                     'their dollars are left out.</p>' % (
-                         count(totals['calls_without_public_price']), count(facts['calls']),
-                         esc(', '.join(est['models_without_public_price']))))
-    gap = _gap_share(recorded)
-    if gap is not None and gap > 0.02:
-        lines.append('<p class="warn">Claude Code recorded a session total about %s higher than this transcript total. '
-                     'The difference is calls the transcript does not hold; this receipt shows only the transcript. '
-                     'Details are in the fine print.</p>' % percent(gap))
-    return '<header>%s</header>' % ''.join(lines)
 
+# ---------------------------------------------------------------- layer 1: the answer
 
 def _gap_share(recorded):
     """The gap as a share of the recorded total, using the low end of the range (so it is never overstated)."""
@@ -133,34 +87,60 @@ def _gap_share(recorded):
     return recorded['gap_usd_low'] / recorded['session_total_usd_low']
 
 
-def _tiles(est):
-    """Four big numbers."""
-    totals = est['totals']
-    tiles = [(money(totals['transcript_usd']), 'Total, API-equivalent', 'exact'),
-             (count(est['session']['calls']), 'Model calls', 'exact'),
-             (count(totals['largest_prompt_tokens']), 'Largest prompt, in tokens', 'exact'),
-             (percent(totals['carried_share']), 'Of the dollars went to re-sending earlier material', 'est.')]
-    cells = ''.join('<div class="tile"><div class="num">%s</div><div class="lbl">%s %s</div></div>' % (
-        value, esc(label), tag('exact' if word == 'exact' else 'est')) for value, label, word in tiles)
-    return '<section class="tiles">%s</section>' % cells
+def _top(est, pg):
+    """Title line, the API-equivalent note, and the warnings that apply."""
+    facts, totals = est['session'], est['totals']
+    lines = ['<h1>%s</h1>' % esc(facts['project']),
+             '<p class="meta">%s &middot; ran %s &middot; %s &middot; %s model calls and %s tool calls</p>' % (
+                 esc(when(facts['started'])), esc(duration(facts['duration_seconds'])), esc(', '.join(facts['models'])),
+                 count(facts['calls']), count(facts['tool_calls'])),
+             '<p class="note">Every dollar on this page is %s: tokens times public API prices. On a subscription nobody is '
+             'billed this amount.</p>' % pg.term('api')]
+    if est['models_without_public_price']:
+        lines.append('<p class="warn">%s of %s calls use a model with no public price (%s). Their tokens are shown; '
+                     'their dollars are left out.</p>' % (
+                         count(totals['calls_without_public_price']), count(facts['calls']),
+                         esc(', '.join(est['models_without_public_price']))))
+    gap = _gap_share(est['recorded_total'])
+    if gap is not None and gap > 0.02:
+        lines.append('<p class="warn">Claude Code recorded a session total about %s higher than this transcript total. '
+                     'The difference is calls the transcript does not hold; this receipt shows only the transcript. '
+                     'Details are in the fine print.</p>' % percent(gap))
+    return '<header>%s</header>' % ''.join(lines)
 
 
-def swatch(color, cls='sw', size=14):
-    """A colour square drawn as inline SVG, so it survives printing and PDF export."""
-    return ('<svg class="%s" width="%d" height="%d" viewBox="0 0 %d %d" aria-hidden="true">'
-            '<rect x="0.5" y="0.5" width="%d" height="%d" rx="3" fill="%s" stroke="#00000040"/></svg>'
-            % (cls, size, size, size, size, size - 1, size - 1, color))
-
-
-def chip(color):
-    """The small kind-colour square in front of a row."""
-    return swatch(color, 'chip', 12)
-
-
-def _headline(est):
-    """One sentence under the tiles: the single largest cause, taken from the findings."""
+def _headline(est, pg):
+    """The single largest cause in plain words, with its dollars. It is an estimate, so it says so."""
     found = est['findings']['headline']
-    return '<p class="headline">%s</p>' % esc(found['sentence']) if found else ''
+    if not found:
+        return ''
+    text = pg.annotate(esc(found['sentence']), ['start'])
+    return '<p class="headline">%s%s</p>' % (text, '' if '(est.)' in found['sentence'] else ' ' + pg.tag('est'))
+
+
+def _tile(value, label_html, kind, pg):
+    """One big number with a label that never wraps mid-phrase, and its exact or est. word beside it."""
+    return '<div class="tile"><div class="num">%s</div><div class="lbl"><span class="t">%s</span>%s</div></div>' % (
+        value, label_html, pg.tag(kind))
+
+
+def task_cost(est):
+    """The cost of the task itself, the total minus the starting context, when the starting context is over half."""
+    found = est['findings']['headline']
+    return found['numbers']['task_usd'] if found and found['id'] == 'fixed_overhead' else None
+
+
+def _tiles(est, pg):
+    """Four tiles, and a fifth (the task itself) only when most of the cost was the starting context."""
+    totals = est['totals']
+    tiles = [_tile(money(totals['transcript_usd']), 'Total, API-equivalent', 'exact', pg),
+             _tile(count(est['session']['calls']), pg.term('call', 'Model calls'), 'exact', pg),
+             _tile(percent(totals['carried_share']), pg.term('resent', 'Re-sent') + ' share of cost', 'est', pg),
+             _tile(money(est['rebuild_extra_usd']), pg.term('rebuild', 'Cache rebuild') + ' extra', 'est', pg)]
+    task = task_cost(est)
+    if task is not None:
+        tiles.append(_tile(money(task), 'Cost of the task itself', 'est', pg))
+    return '<section class="tiles" style="--n:%d">%s</section>' % (len(tiles), ''.join(tiles))
 
 
 def _total_row(est):
@@ -172,42 +152,94 @@ def _total_row(est):
     else:
         check = ('<span class="nomatch">Does not match: the lines add up to $%.6f, but the total at the top is $%.6f</span>'
                  % (lines_sum, headline))
-    return ('<tr class="totalrow"><td></td><td>Total of the lines above</td><td class="r">%s</td><td class="r">100%%</td>'
-            '<td class="check">%s</td></tr>' % (money(lines_sum), check))
+    return ('<table class="legend totaltable"><tr class="totalrow"><td>Total of the lines above</td><td class="r">%s</td>'
+            '<td class="r">100%%</td><td class="check">%s</td></tr></table>' % (money(lines_sum), check))
 
 
-def _where(est):
-    """The stacked bar by kind, with a legend that gives dollars and percent, and a total row."""
+def kinds_option(est):
+    """The ECharts option for where the money went: one horizontal stacked bar, labelled, in dollars."""
     rows = [r for r in est['kinds'] if r['usd'] > 0]
-    x, rects = 0.0, []
+    total = est['totals']['transcript_usd']
+    lead = sorted(rows, key=lambda r: -r['usd'])[:3]
+    title = ('%s made up %s of the total' % (lead[0]['label'], fmt.percent(lead[0]['share'])) if len(lead) < 3 else
+             'Three lines made up %s of the total' % fmt.percent(sum(r['share'] for r in lead)))
+    series = []
     for row in rows:
-        width = row['share'] * 1000
-        rects.append('<rect x="%.2f" y="0" width="%.2f" height="46" fill="%s"><title>%s: %s, %s</title></rect>' % (
-            x, max(width, 0.0), KIND_COLORS[row['key']], esc(row['label']), money(row['usd']), percent(row['share'])))
-        x += width
-    legend = ''.join(
-        '<tr><td>%s</td><td>%s</td><td class="r">%s</td><td class="r">%s</td><td>%s</td></tr>' % (
-            swatch(KIND_COLORS[r['key']]), esc(r['label']), money(r['usd']), percent(r['share']),
-            tag('exact' if r['exact'] else 'est')) for r in rows)
-    return ('<section class="keepsec"><h2>Where the money went</h2><p class="sub">Every dollar of the transcript total, by what it was spent on.</p>'
-            '<div class="keep"><svg class="kindbar" viewBox="0 0 1000 46" role="img" aria-label="Dollars by kind">%s</svg>'
-            '<table class="legend kindlegend">%s%s</table>'
-            '<p class="small">Each line is rounded, so the lines may not add up to the last cent. The total is the exact sum.</p>'
-            '</div></section>' % (''.join(rects), legend, _total_row(est)))
+        label = ''
+        if row['share'] >= 0.12:
+            label = '%s\n%s' % (SHORT_KIND[row['key']], fmt.percent(row['share']))
+        elif row['share'] >= 0.04:
+            label = fmt.percent(row['share'])
+        tip = '<b>%s</b><br>%s &middot; %s of the total <span class="tag %s">%s</span>' % (
+            esc(row['label']), money(row['usd']), percent(row['share']), 'exact' if row['exact'] else 'est',
+            'exact' if row['exact'] else 'est.')
+        color = KIND_COLORS[row['key']]
+        series.append({'type': 'bar', 'name': row['label'], 'stack': 'total', 'barWidth': 44,
+                       'data': [{'value': row['usd'], 'tip': tip}],
+                       'itemStyle': {'color': color, 'borderColor': '#ffffff', 'borderWidth': 1},
+                       'label': {'show': bool(label), 'position': 'inside', 'formatter': label,
+                                 'color': contrast_ink(color), 'fontSize': 13, 'lineHeight': 16},
+                       'emphasis': {'focus': 'series'}})
+    decimals = 2 if total >= 0.1 else 3 if total >= 0.01 else 4
+    return {'title': {'text': title, 'left': 0, 'top': 4, 'textStyle': {'fontSize': 16, 'fontWeight': 700, 'color': INK}},
+            'tooltip': {'trigger': 'item', 'confine': True, 'formatter': 'fn:tip'},
+            'grid': {'left': 8, 'right': 24, 'top': 44, 'bottom': 48},
+            'xAxis': {'type': 'value', 'min': 0, 'max': total, 'name': 'Dollars, API-equivalent', 'nameLocation': 'middle',
+                      'nameGap': 30, 'nameTextStyle': {'color': INK, 'fontSize': 13},
+                      'axisLabel': {'formatter': 'fn:usd%d' % decimals, 'color': INK, 'fontSize': 13, 'showMaxLabel': False},
+                      'splitLine': {'lineStyle': {'color': page.UI['line']}}},
+            'yAxis': {'type': 'category', 'data': ['Total'], 'show': False},
+            'series': series, 'textStyle': {'fontFamily': page.FONT_STACK}}
 
+
+def _where(est, pg):
+    """Layer 1 chart: one stacked bar, then the legend table (with its total row and check) and its CSV button."""
+    rows = [r for r in est['kinds'] if r['usd'] > 0]
+    total = est['totals']['transcript_usd']
+    if not rows or not total:
+        return section('where', 'Where did the money go?',
+                       'Nothing here has a public price, so there are no dollars to split.', '')
+    ranked = sorted(rows, key=lambda r: -r['usd'])
+    top = ranked[0]
+    answer = 'Most went to %s: %s of the %s total (%s). %s' % (
+        esc(top['label'].lower()), money(top['usd']), money(total), percent(top['share']),
+        pg.tag('exact') if top['exact'] else pg.tag('est'))
+    bits = ['%s %s (%s)' % (r['label'], fmt.money(r['usd']), fmt.percent(r['share'])) for r in ranked[:3]]
+    rest = total - sum(r['usd'] for r in ranked[:3])
+    summary = 'The largest lines, in order: %s%s.' % (', '.join(bits), (', and the rest together %s' % fmt.money(rest))
+                                                       if len(ranked) > 3 else '')
+    cells = ['<tr><td>%s</td><td>%s</td><td class="r">%s</td><td class="r">%s</td><td>%s</td></tr>' % (
+        swatch(KIND_COLORS[r['key']]), esc(r['label']), money(r['usd']), percent(r['share']),
+        pg.tag('exact' if r['exact'] else 'est')) for r in rows]
+    cut = (len(cells) + 1) // 2
+    halves = [cells] if len(cells) <= 6 else [cells[:cut], cells[cut:]]
+    legend = ''.join('<table class="legend kindlegend">%s</table>' % ''.join(half) for half in halves)
+    chart = pg.chart('chart-kinds', kinds_option(est), 148, esc(summary) + ' ' + pg.tag('est'), 'Dollars by kind of work')
+    csv_rows = [(r['label'], '%.6f' % r['usd'], '%.4f' % r['share'], 'exact' if r['exact'] else 'est') for r in est['kinds']]
+    button = pg.csv_button('kinds', 'where-the-money-went.csv', ('line', 'usd_api_equivalent', 'share_of_total', 'basis'),
+                           csv_rows)
+    table = ('<div class="keep" id="kindtable"><div class="legendcols">%s</div>%s'
+             '<p class="small">Each line is rounded, so the lines may not add up to the last cent. The total is the exact sum.'
+             ' %s</p></div>' % (legend, _total_row(est), button))
+    return section('where', 'Where did the money go?', answer, chart + table)
+
+
+# ---------------------------------------------------------------- layer 2: the explanation
 
 def _bar(parts, scale):
-    """A bar split into output, new, carried, and subagent work, drawn as SVG. Width is relative to `scale`."""
+    """A bar split into output, new, carried (re-sent), and subagent work, drawn as SVG. Width is relative to `scale`."""
     total = sum(parts.values())
     fill = max(total / scale * 1000, 4.0) if scale else 4.0
+    colors = {'output': COST_COLORS['output'], 'new': COST_COLORS['new'], 'carried': COST_COLORS['resent'],
+              'subagent': COST_COLORS['subagent']}
     rects, x = [], 0.0
     for key in ('output', 'new', 'carried', 'subagent'):
         width = parts[key] / total * fill if total > 0 else 0.0
         if width > 0:
-            rects.append('<rect x="%.2f" y="0" width="%.2f" height="12" fill="%s"/>' % (x, width, COST_COLORS[key]))
+            rects.append('<rect x="%.2f" y="0" width="%.2f" height="12" fill="%s"/>' % (x, width, colors[key]))
             x += width
     return ('<svg class="costbar" viewBox="0 0 1000 12" preserveAspectRatio="none" role="img" aria-label="Cost split">'
-            '<rect width="1000" height="12" fill="#ECEAE4"/>%s</svg>' % ''.join(rects))
+            '<rect width="1000" height="12" fill="%s"/>%s</svg>' % (page.UI['track'], ''.join(rects)))
 
 
 def _parts(step):
@@ -216,13 +248,13 @@ def _parts(step):
             'subagent': step['subagent']['usd'] if step['subagent'] else 0.0}
 
 
-def _split_text(parts):
+def _split_text(parts, pg):
     """The same split in words, each with its exact/est. word."""
-    bits = ['Output %s %s' % (money(parts['output']), tag('exact')),
-            'New %s %s' % (money(parts['new']), tag('est')),
-            'Carried %s %s' % (money(parts['carried']), tag('est'))]
+    bits = ['Output %s %s' % (money(parts['output']), pg.tag('exact')),
+            'New %s %s' % (money(parts['new']), pg.tag('est')),
+            'Carried %s %s' % (money(parts['carried']), pg.tag('est'))]
     if parts['subagent']:
-        bits.append('Subagent work %s %s' % (money(parts['subagent']), tag('exact')))
+        bits.append('Subagent work %s %s' % (money(parts['subagent']), pg.tag('exact')))
     return ' &middot; '.join(bits)
 
 
@@ -232,117 +264,221 @@ def _step_numbers(numbers):
     return 'Step ' + names[0] if len(names) == 1 else 'Steps ' + ', '.join(names[:-1]) + ' and ' + names[-1]
 
 
-def _cards(est):
+def _cost_legend(pg):
+    """What the colours of a cost bar mean. The first time on the page, the terms explain themselves."""
+    labels = (('output', esc('Output (the model\'s writing and thinking)')),
+              ('new', pg.term('new', 'New') + ' (first time sent)'),
+              ('resent', pg.term('carried', 'Carried cost') + ' (' + pg.term('resent', 're-sent') + ' on later calls)'),
+              ('subagent', 'Subagent work'))
+    return ' '.join('<span class="key">%s%s</span>' % (swatch(COST_COLORS[k]), v) for k, v in labels)
+
+
+def _cards(est, pg):
     """The three biggest causes. Steps that share a target are merged into one card."""
+    tops = est['findings']['top_steps']
+    if not tops:
+        return section('expensive', 'What made it expensive?', 'No step has a public price, so none can be ranked.', '')
+    total = est['totals']['transcript_usd']
+    added = sum(t['total_usd'] for t in tops)
+    answer = ('The costliest %s added up to %s, %s of the total. A step\'s cost is its own output plus what its results cost '
+              'to send, now and on every later call. %s' % ('step' if len(tops) == 1 else 'causes', money(added),
+                                                            percent(added / total if total else 0), pg.tag('est')))
     cards = []
-    for top in est['findings']['top_steps']:
-        total = '<span class="cardcost">%s</span>%s' % (money(top['total_usd']), ' <span class="sub">in total</span>' if top['times'] > 1 else '')
+    for top in tops:
+        total_html = '<span class="cardcost">%s</span>%s' % (
+            money(top['total_usd']), ' <span class="sub">in total</span>' if top['times'] > 1 else '')
         cards.append(
-            '<div class="card"><div class="cardhead">%s<b>%s</b></div><div class="cardmoney">%s</div><div class="what">%s</div>%s'
+            '<div class="card"><div class="cardhead">%s<b>%s</b></div><div>%s</div><div class="what">%s</div>%s'
             '<div class="split">%s</div><p class="why">%s</p></div>' % (
-                chip(KIND_COLORS[top['kind']]), _step_numbers(top['steps']), total, esc(top['description']),
-                _bar(top['parts'], top['total_usd']), _split_text(top['parts']), esc(top['sentence'])))
-    body = ''.join(cards) or '<p class="sub">No step has a public price, so none can be ranked.</p>'
-    return ('<section><h2>The three most expensive steps</h2><p class="sub">A step\'s cost is its own output plus what '
-            'its results cost to send, now and on every later call. Steps that touched the same file are merged into one card.</p>'
-            '<div class="cards">%s</div><div class="legendline">%s</div></section>' % (body, _cost_legend()))
+                chip(KIND_COLORS[top['kind']]), _step_numbers(top['steps']), total_html, esc(top['description']),
+                _bar(top['parts'], top['total_usd']), _split_text(top['parts'], pg), esc(top['sentence'])))
+    return section('expensive', 'What made it expensive?', answer,
+                   '<div class="cards">%s</div><div class="legendline">%s</div>' % (''.join(cards), _cost_legend(pg)))
 
 
-def _cost_legend():
-    """What the colours of a cost bar mean."""
-    labels = (('output', 'Output (the model\'s writing and thinking)'), ('new', 'New (first time sent)'),
-              ('carried', 'Carried (re-sent on later calls)'), ('subagent', 'Subagent work'))
-    return ' '.join('<span class="key">%s%s</span>' % (swatch(COST_COLORS[k]), esc(v)) for k, v in labels)
+def call_costs(est):
+    """The exact dollars of each main-thread call, with the subagent work that the call's step launched added in."""
+    launched = {s['order']: s['subagent']['usd'] for s in est['steps'] if s['subagent']}
+    return [(c['usd'] or 0.0) + launched.get(c['order'], 0.0) for c in est['calls']]
 
 
-def _nice_ceiling(value):
-    """A round number at or above value (1, 2, 2.5, 5 or 10 times a power of ten)."""
-    magnitude = 10 ** (len(str(int(max(value, 1)))) - 1)
-    for factor in (1, 2, 2.5, 5, 10):
-        if factor * magnitude >= value:
-            return factor * magnitude
-    return 10 * magnitude
+def _zoom(n):
+    """Zoom controls for a long series: scroll or drag, plus a slider. Returns (controls, extra room at the bottom)."""
+    if n <= ZOOM_FROM:
+        return [], 0
+    return [{'type': 'inside', 'filterMode': 'none'},
+            {'type': 'slider', 'height': 20, 'bottom': 8, 'filterMode': 'none', 'borderColor': page.UI['line']}], 36
 
 
-def _x_ticks(n):
-    """Which call numbers get a label on the x axis: about eight, at round numbers, plus the last."""
-    step = next(s for s in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000) if n / s <= 8)
-    ticks = [1] + [k for k in range(step, n + 1, step) if k > 1]
-    return ticks if n - ticks[-1] >= step / 2 or n in ticks else ticks[:-1] + [n]
+def _growth_statement(calls):
+    """A statement title for the growth chart, with its own numbers."""
+    first, peak = calls[0]['prompt_tokens'], max(c['prompt_tokens'] for c in calls)
+    if len(calls) == 1:
+        return 'The session made one call, with a prompt of %s tokens' % count(first)
+    ratio = peak / first if first else 1.0
+    if ratio >= 1.95:
+        return 'Prompt size grew %dx over the session' % round(ratio)
+    if ratio >= 1.1:
+        return 'Prompt size grew %d%% over the session' % round((ratio - 1) * 100)
+    return 'Prompt size stayed about the same over the session'
 
 
-GROWTH = {'left': 78, 'right': 990, 'top': 34, 'bottom': 310, 'width': 1000, 'height': 392}
+def growth_option(est):
+    """The ECharts option for how the conversation grew: one stacked bar per call, markers for rebuilds and compactions."""
+    calls, n = est['calls'], len(est['calls'])
+    rebuilds = {s['order']: s['rebuild'] for s in est['steps'] if s['rebuild']}
+    labels = [str(i + 1) for i in range(n)]
+    zoom, extra_bottom = _zoom(n)
+    common = {'type': 'bar', 'stack': 'prompt', 'large': n > 400, 'largeThreshold': 400}
+    series = [dict(common, name='Re-sent', data=[c['resent_tokens'] for c in calls], itemStyle={'color': COST_COLORS['resent']}),
+              dict(common, name='New', data=[c['new_tokens'] for c in calls], itemStyle={'color': COST_COLORS['new']})]
+    legend = ['Re-sent', 'New']
+    marks = [i for i, c in enumerate(calls) if c['order'] in rebuilds]
+    if marks:
+        series.append({'type': 'scatter', 'name': 'Cache rebuilt', 'symbol': 'triangle', 'symbolSize': 14,
+                       'symbolOffset': [0, -12],
+                       'itemStyle': {'color': MARK_COLORS['rebuild'], 'borderColor': '#ffffff', 'borderWidth': 1},
+                       'data': [[i, calls[i]['prompt_tokens']] for i in marks], 'z': 5})
+        legend.append('Cache rebuilt')
+    cuts = [i for i in range(1, n) if calls[i]['segment'] != calls[i - 1]['segment']]
+    if cuts:
+        series.append({'type': 'line', 'name': 'Compacted', 'data': [], 'symbol': 'none',
+                       'lineStyle': {'type': 'dashed', 'color': INK, 'width': 2}, 'itemStyle': {'color': INK},
+                       'markLine': {'silent': True, 'symbol': 'none',
+                                    'label': {'formatter': 'Compacted', 'position': 'insideEndTop', 'color': INK, 'fontSize': 13},
+                                    'lineStyle': {'type': 'dashed', 'color': INK, 'width': 1.5},
+                                    'data': [{'xAxis': i - 0.5} for i in cuts]}})
+        legend.append('Compacted')
+    return {'title': {'text': _growth_statement(calls), 'left': 0, 'top': 4,
+                      'textStyle': {'fontSize': 16, 'fontWeight': 700, 'color': INK}},
+            'legend': {'data': legend, 'left': 0, 'top': 32, 'itemWidth': 16, 'itemHeight': 12, 'itemGap': 24,
+                       'textStyle': {'color': INK, 'fontSize': 13}},
+            'tooltip': {'trigger': 'axis', 'axisPointer': {'type': 'shadow'}, 'confine': True, 'formatter': 'fn:growth_tip'},
+            'grid': {'left': 8, 'right': 24, 'top': 100, 'bottom': 56 + extra_bottom, 'containLabel': True},
+            'xAxis': {'type': 'category', 'data': labels, 'name': 'Model call, in order', 'nameLocation': 'middle',
+                      'nameGap': 32, 'nameTextStyle': {'color': INK, 'fontSize': 13},
+                      'axisLabel': {'color': INK, 'fontSize': 13}, 'axisTick': {'alignWithLabel': True}},
+            'yAxis': {'type': 'value', 'name': 'Tokens in the prompt',
+                      'nameTextStyle': {'color': INK, 'fontSize': 13, 'align': 'left'},
+                      'axisLabel': {'formatter': 'fn:tok', 'color': INK, 'fontSize': 13},
+                      'splitLine': {'lineStyle': {'color': page.UI['line']}}},
+            'dataZoom': zoom, 'series': series, 'textStyle': {'fontFamily': page.FONT_STACK}}
 
 
-def _growth_axes(peak, n):
-    """Gridlines, y labels, x ticks, and axis titles for the growth chart."""
-    g, top = GROWTH, _nice_ceiling(peak)
-    span = g['bottom'] - g['top']
-    out = ['<text x="%d" y="18" font-size="15" fill="#333" font-weight="600">Tokens in the prompt</text>' % g['left']]
-    for i in range(5):
-        y = g['bottom'] - span * i / 4
-        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="%s"/>' % (
-            g['left'], y, g['right'], y, '#999' if i == 0 else '#E3E0D8'))
-        out.append('<text x="%d" y="%.1f" font-size="14" fill="#444" text-anchor="end">%s</text>' % (
-            g['left'] - 8, y + 5, short_tokens(top * i / 4)))
-    slot = (g['right'] - g['left']) / n
-    for k in _x_ticks(n):
-        x = g['left'] + slot * (k - 0.5)
-        out.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" stroke="#999"/>' % (x, g['bottom'], x, g['bottom'] + 5))
-        out.append('<text x="%.1f" y="%d" font-size="14" fill="#444" text-anchor="middle">%d</text>' % (x, g['bottom'] + 24, k))
-    out.append('<text x="%d" y="%d" font-size="15" fill="#333" font-weight="600" text-anchor="middle">Model call, in order</text>' % (
-        (g['left'] + g['right']) // 2, g['bottom'] + 52))
-    return ''.join(out), top
+def growth_data(est):
+    """What the growth tooltips need, as plain numbers: tokens by type, the call's dollars, rebuild pauses, compactions."""
+    calls = est['calls']
+    rebuilds = {s['order']: s['rebuild'] for s in est['steps'] if s['rebuild']}
+    rows = [[c['tokens']['input'], c['tokens']['cache_read'], c['tokens']['cache_write_5m'], c['tokens']['cache_write_1h'],
+             c['tokens']['output'], c['prompt_tokens'], c['usd']] for c in calls]
+    rebuilt = {str(i): [round(rebuilds[c['order']]['pause_minutes'] or 0, 1), rebuilds[c['order']]['miss_reason']]
+               for i, c in enumerate(calls) if c['order'] in rebuilds}
+    cuts = [i for i in range(1, len(calls)) if calls[i]['segment'] != calls[i - 1]['segment']]
+    return {'calls': rows, 'rebuilds': rebuilt, 'compacted': cuts}
 
 
-def _marker(kind):
-    """A drawn legend marker (inline SVG, so it prints)."""
-    shapes = {'resent': '<rect x="1" y="1" width="14" height="14" rx="2" fill="#0077BB"/>',
-              'new': '<rect x="1" y="1" width="14" height="14" rx="2" fill="#EE7733"/>',
-              'rebuild': '<polygon points="8,15 1,2 15,2" fill="#CC3311"/>',
-              'compacted': '<line x1="8" y1="0" x2="8" y2="16" stroke="#222" stroke-width="2" stroke-dasharray="4 3"/>'}
-    return '<svg class="mk" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">%s</svg>' % shapes[kind]
-
-
-def _growth(est):
-    """One bar per main-thread call: prompt size split into re-sent and new. Exact numbers."""
+def _growth(est, pg):
+    """Layer 2: how the conversation grew. Exact numbers, with a text summary under the chart."""
     calls = est['calls']
     if not calls:
         return ''
-    g = GROWTH
-    rebuilds = {s['order']: s['rebuild'] for s in est['steps'] if s['rebuild']}
-    axes, top = _growth_axes(max(c['prompt_tokens'] for c in calls) or 1, len(calls))
-    span, slot = g['bottom'] - g['top'], (g['right'] - g['left']) / len(calls)
-    bars, marks, last_segment = [], [], calls[0]['segment']
-    for i, call in enumerate(calls):
-        x, bw = g['left'] + i * slot + slot * 0.07, max(slot * 0.86, 0.6)
-        h_resent, h_new = span * call['resent_tokens'] / top, span * call['new_tokens'] / top
-        tip = 'Call %d: %s tokens in the prompt (%s re-sent, %s new)' % (
-            i + 1, count(call['prompt_tokens']), count(call['resent_tokens']), count(call['new_tokens']))
-        bars.append('<g><title>%s</title><rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#0077BB"/>'
-                    '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#EE7733"/></g>' % (
-                        tip, x, g['bottom'] - h_resent, bw, h_resent, x, g['bottom'] - h_resent - h_new, bw, h_new))
-        if call['segment'] != last_segment:
-            edge = g['left'] + i * slot
-            marks.append('<line x1="%.2f" y1="%d" x2="%.2f" y2="%d" stroke="#222" stroke-width="1.5" stroke-dasharray="5 4"/>'
-                         '<text x="%.2f" y="%d" font-size="13" fill="#222">compacted</text>' % (
-                             edge, g['top'] - 8, edge, g['bottom'], edge + 4, g['top'] + 6))
-            last_segment = call['segment']
-        if call['order'] in rebuilds:
-            cx, peak_y = x + bw / 2, g['bottom'] - h_resent - h_new
-            marks.append('<polygon points="%.2f,%.2f %.2f,%.2f %.2f,%.2f" fill="#CC3311"><title>Cache rebuilt after %s</title>'
-                         '</polygon>' % (cx, peak_y - 3, cx - 7, peak_y - 17, cx + 7, peak_y - 17,
-                                          esc(minutes(rebuilds[call['order']]['pause_minutes']))))
-    return ('<section class="keepsec"><h2>How the conversation grew</h2><p class="sub">One bar per model call in the main thread, in order. '
-            'Height is the size of the prompt that call sent. These numbers are %s.</p>'
-            '<div class="keep"><svg class="growth" viewBox="0 0 %d %d" role="img" aria-label="Prompt size by call">%s%s%s</svg>'
-            '<div class="legendline"><span class="key">%sRe-sent (served from the saved copy)</span> '
-            '<span class="key">%sNew (written for the first time)</span> '
-            '<span class="key">%sCache rebuilt (the saved copy had expired)</span> '
-            '<span class="key">%sCompacted</span></div></div></section>' % (
-                tag('exact'), g['width'], g['height'], axes, ''.join(bars), ''.join(marks),
-                _marker('resent'), _marker('new'), _marker('rebuild'), _marker('compacted')))
+    first, last, peak = calls[0]['prompt_tokens'], calls[-1]['prompt_tokens'], est['totals']['largest_prompt_tokens']
+    resent_share = sum(c['resent_tokens'] for c in calls) / max(sum(c['prompt_tokens'] for c in calls), 1)
+    cuts = len(est['segments']) - 1
+    notes = []
+    if est['rebuilds']:
+        notes.append('The saved copy expired %s time%s' % (count(est['rebuilds']), '' if est['rebuilds'] == 1 else 's'))
+    if cuts:
+        notes.append('the conversation was compacted %s time%s' % (count(cuts), '' if cuts == 1 else 's'))
+    summary = ('The prompt was %s tokens on the first call and %s on the last; the largest was %s tokens. %s of all prompt '
+               'tokens sent were re-sent material.%s' % (
+                   count(first), count(last), count(peak), fmt.percent(resent_share),
+                   (' ' + '; '.join(notes) + '.') if notes else ''))
+    summary = esc(summary) + ' ' + pg.tag('exact')
+    answer = ('Every call sends the whole conversation again, so the prompt only gets bigger: most of each bar is %s material, '
+              'and a little is %s.' % (pg.term('resent', 're-sent'), pg.term('new', 'new')))
+    pg.data['growth'] = growth_data(est)
+    chart = pg.chart('chart-growth', growth_option(est), 440 if len(calls) <= ZOOM_FROM else 476, summary,
+                     'Prompt size by model call')
+    return section('growth', 'How did the conversation grow?', answer, chart)
 
+
+def _running_statement(cum):
+    """A statement title for the running-total chart: how far along the session half of the money was spent."""
+    n = len(cum)
+    if n == 1 or not cum[-1]:
+        return 'All of the cost came from one call' if n == 1 else 'The calls had no public price'
+    half = next(i for i, v in enumerate(cum) if v >= cum[-1] / 2)
+    return 'Half of the cost was spent by call %d of %d' % (half + 1, n)
+
+
+def running_option(est, cum, marks):
+    """The ECharts option for the running total of dollars across calls, with the top steps marked on the line."""
+    n = len(cum)
+    zoom, extra_bottom = _zoom(n)
+    points = [{'coord': [index, cum[index]], 'value': rank, 'symbolSize': 26,
+               'itemStyle': {'color': color, 'borderColor': '#ffffff', 'borderWidth': 2},
+               'label': {'show': True, 'formatter': str(rank), 'color': contrast_ink(color), 'fontSize': 13}}
+              for index, rank, color in marks]
+    decimals = 2 if cum[-1] >= 0.1 else 3 if cum[-1] >= 0.01 else 4
+    return {'title': {'text': _running_statement(cum), 'left': 0, 'top': 4,
+                      'textStyle': {'fontSize': 16, 'fontWeight': 700, 'color': INK}},
+            'tooltip': {'trigger': 'axis', 'confine': True, 'formatter': 'fn:running_tip'},
+            'grid': {'left': 8, 'right': 24, 'top': 72, 'bottom': 56 + extra_bottom, 'containLabel': True},
+            'xAxis': {'type': 'category', 'data': [str(i + 1) for i in range(n)], 'name': 'Model call, in order',
+                      'nameLocation': 'middle', 'nameGap': 32, 'boundaryGap': False,
+                      'nameTextStyle': {'color': INK, 'fontSize': 13}, 'axisLabel': {'color': INK, 'fontSize': 13}},
+            'yAxis': {'type': 'value', 'name': 'Dollars so far, API-equivalent',
+                      'nameTextStyle': {'color': INK, 'fontSize': 13, 'align': 'left'},
+                      'axisLabel': {'formatter': 'fn:usd%d' % decimals, 'color': INK, 'fontSize': 13},
+                      'splitLine': {'lineStyle': {'color': page.UI['line']}}},
+            'dataZoom': zoom, 'textStyle': {'fontFamily': page.FONT_STACK},
+            'series': [{'type': 'line', 'name': 'Dollars so far', 'data': cum, 'symbol': 'none', 'step': 'end',
+                        'lineStyle': {'color': INK, 'width': 3}, 'itemStyle': {'color': INK}, 'sampling': 'lttb',
+                        'markPoint': {'data': points, 'silent': True}}]}
+
+
+def _top_marks(est):
+    """Where the top three steps sit on the running-total line: (call index, rank, kind colour), plus tooltip words."""
+    position = {c['order']: i for i, c in enumerate(est['calls'])}
+    by_number = {s['number']: s for s in est['steps']}
+    marks, notes = [], {}
+    for rank, card in enumerate(est['findings']['top_steps'], start=1):
+        for number in card['steps']:
+            index = position.get(by_number[number]['order'])
+            if index is None:
+                continue
+            marks.append((index, rank, KIND_COLORS[card['kind']]))
+            notes[str(index)] = [rank, number, card['description'], card['total_usd']]
+    return marks, notes
+
+
+def _running(est, pg):
+    """Layer 2: the running total across calls, with the costliest steps marked on the line."""
+    calls = est['calls']
+    if not calls:
+        return ''
+    steps = call_costs(est)
+    cum, running = [], 0.0
+    for value in steps:
+        running += value
+        cum.append(round(running, 9))
+    marks, notes = _top_marks(est)
+    total = est['totals']['transcript_usd']
+    pg.data['running'] = {'calls': [round(v, 9) for v in steps], 'top': notes}
+    answer = ('The line climbs each time a call is paid for. The numbered markers are the costliest steps from the cards above, '
+              'in the same order.')
+    summary = 'The running total reaches %s by the last call.' % fmt.money(cum[-1])
+    gap = total - cum[-1]
+    if gap > estimate.SUM_BACK_TOLERANCE:
+        summary += (' The other %s of the %s total is subagent work that no step launched, so it is not on this line.'
+                    % (fmt.money(gap), fmt.money(total)))
+    chart = pg.chart('chart-running', running_option(est, cum, marks), 384 if len(calls) <= ZOOM_FROM else 420,
+                     esc(summary) + ' ' + pg.tag('exact'), 'Running total of dollars by model call')
+    return section('piling', 'Where did the cost pile up over time?', answer, chart)
+
+
+# ---------------------------------------------------------------- layer 3: the evidence
 
 def _tool_lines(step, cwd):
     """The tool calls of a step for the detail view: tool, what it touched, result size, error."""
@@ -371,7 +507,7 @@ def _flags(step):
         info = step['rebuild']
         reason = ' (%s)' % info['miss_reason'] if info['miss_reason'] else ''
         flags.append('Cache rebuilt after %s%s: writing the conversation again cost %s (est.) more than re-sending it would have'
-                     % (minutes(info['pause_minutes']), reason, money(info['extra_usd'])))
+                     % (minutes(info['pause_minutes']), reason, fmt.money(info['extra_usd'])))
     if step['growth_skipped']:
         flags.append('Result size could not be read from growth')
     if not step['priced']:
@@ -397,14 +533,25 @@ def _detail(step, cwd):
     if step['subagent']:
         sub = '<p><b>Subagent work:</b> %s subagent(s) made %s model calls, %s %s.</p>' % (
             count(step['subagent']['agents']), count(step['subagent']['calls']), money(step['subagent']['usd']), tag('exact'))
-    return ('<td colspan="5"><div class="detailbox"><p><b>Exact tokens</b> %s<br>%s</p><p><b>Estimated</b> %s<br>%s</p>%s'
+    return ('<td colspan="4"><div class="detailbox"><p><b>Exact tokens</b> %s<br>%s</p><p><b>Estimated</b> %s<br>%s</p>%s'
             '%s<p><b>Tool calls</b></p>%s</div></td>' % (
                 tag('exact'), exact, tag('est'), est, sub,
                 ('<ul class="flags">%s</ul>' % flags) if flags else '', _tool_lines(step, cwd)))
 
 
-def _steps(est):
-    """The table of every step, with sort, filter, expand, and a top-50 default."""
+def _steps_csv(est):
+    """Every step as CSV rows, with the exact or est. basis in each column name."""
+    header = ('step', 'kind', 'what_happened', 'output_usd_exact', 'new_usd_est', 'carried_usd_est', 'subagent_usd_exact',
+              'total_usd_est', 'tool_calls', 'flags')
+    rows = [(s['number'], estimate.KIND_LABELS[s['kind']], s['description'], '%.6f' % s['output_usd'], '%.6f' % s['new_usd'],
+             '%.6f' % s['carried_usd'], '%.6f' % (s['subagent']['usd'] if s['subagent'] else 0.0),
+             '%.6f' % s['total_usd'] if s['priced'] else 'no public price', len(s['tool_calls']),
+             '; '.join(f.split(':')[0] for f in _flags(s))) for s in est['steps']]
+    return header, rows
+
+
+def _steps(est, pg):
+    """Layer 3: the table of every step, with search, sort, kind filter, row detail, top 50 then show all, and CSV."""
     steps, cwd = est['steps'], est['session']['cwd']
     ranked = sorted(steps, key=lambda s: -s['total_usd'])
     rank = {s['number']: i + 1 for i, s in enumerate(ranked)}
@@ -415,112 +562,141 @@ def _steps(est):
         flag_html = ''.join('<span class="flag">%s</span>' % esc(f.split(' after')[0] if f.startswith('Cache') else f)
                             for f in _flags(step))
         total = column(step['total_usd']) if step['priced'] else 'no public price'
+        text = ' '.join([step['description'], estimate.KIND_LABELS[step['kind']]]).lower()
         rows.append(
-            '<tr class="step" tabindex="0" aria-expanded="false" data-order="%d" data-cost="%.9f" data-rank="%d" data-kind="%s">'
-            '<td class="r">%d</td><td>%s%s %s</td>'
-            '<td>%s</td><td class="r">%s</td></tr>' % (
-                step['number'], step['total_usd'], rank[step['number']], step['kind'], step['number'],
-                chip(KIND_COLORS[step['kind']]), esc(step['description']),
-                flag_html, _bar(_parts(step), scale), total)
+            '<tr class="step" tabindex="0" aria-expanded="false" data-order="%d" data-cost="%.9f" data-rank="%d" data-kind="%s" '
+            'data-text="%s"><td class="r">%d</td><td>%s%s %s</td><td>%s</td><td class="r">%s</td></tr>' % (
+                step['number'], step['total_usd'], rank[step['number']], step['kind'], esc(text), step['number'],
+                chip(KIND_COLORS[step['kind']]), esc(step['description']), flag_html, _bar(_parts(step), scale), total)
             + '<tr class="detail" hidden>%s</tr>' % _detail(step, cwd))
     kinds = ''.join('<option value="%s">%s</option>' % (k, esc(l)) for k, l in estimate.KIND_LINES
                     if k in {s['kind'] for s in steps})
-    return ('<section><h2>Every step</h2><p class="sub">One row per model call in the main thread. Click a row for detail. '
-            'Costs here are each step\'s own: its output, plus what its results cost to send. %s</p>'
-            '<div class="controls"><label>Sort <select id="sort"><option value="order">in order</option>'
-            '<option value="cost">by cost</option></select></label> <label>Show <select id="kind"><option value="all">all kinds</option>%s</select></label> '
-            '<button id="showall" type="button">Show all %d steps</button> <span id="shown" class="sub"></span></div>'
-            '<table id="steps"><thead><tr><th class="r">#</th><th>What happened</th><th>Output / new / carried</th>'
-            '<th class="r">Total</th></tr></thead><tbody id="stepbody" data-limit="%d">%s</tbody></table>'
-            '<div class="legendline">%s</div></section>' % (
-                '%s %s' % (tag('exact'), tag('est')), kinds, len(steps), TOP_ROWS, ''.join(rows), _cost_legend()))
+    header, csv_rows = _steps_csv(est)
+    controls = ('<div class="controls"><label>Search <input type="search" id="search" placeholder="file or command"></label> '
+                '<label>Sort <select id="sort"><option value="order">in order</option><option value="cost">by cost</option></select></label> '
+                '<label>Show <select id="kind"><option value="all">all kinds</option>%s</select></label> '
+                '<button id="showall" type="button">Show all %s steps</button> <span id="shown" class="sub"></span> %s</div>' % (
+                    kinds, count(len(steps)), pg.csv_button('steps', 'every-step.csv', header, csv_rows)))
+    table = ('<table id="steps"><thead><tr><th class="r">#</th><th>What happened</th><th>Output / new / carried</th>'
+             '<th class="r">Total</th></tr></thead><tbody id="stepbody" data-limit="%d">%s</tbody></table>'
+             '<div class="legendline">%s</div>' % (TOP_ROWS, ''.join(rows), _cost_legend(pg)))
+    answer = ('One row per model call in the main thread. Click a row for detail. Costs are each step\'s own: its output, plus '
+              'what its results cost to send. %s %s' % (pg.tag('exact'), pg.tag('est')))
+    return collapsible('steps', 'What happened at every step?', answer, controls + table)
 
 
-def _files(est):
-    """The files table."""
+def _files(est, pg):
+    """Layer 3: the files table. The path shows only when it differs from the file name."""
     cwd, files = est['session']['cwd'], est['files']
     if not files:
-        return '<section><h2>Files</h2><p class="sub">No file reads or edits were found.</p></section>'
+        return collapsible('files', 'Which files did it touch?', 'No file reads or edits were found.', '')
     column = money_column([r[k] for r in files for k in ('new_usd', 'carried_usd')])
-    rows = []
+    rows, csv_rows = [], []
     for i, row in enumerate(files):
+        name, shown = os.path.basename(row['path']), display_path(row['path'], cwd)
         repeat = '<span class="flag">read %d times</span>' % (row['reads'] + row['bash_reads']) if row['read_more_than_once'] else ''
+        where = '' if shown == name else '<br><span class="sub">%s</span>' % esc(shown)
         hidden = ' class="extra" hidden' if i >= TOP_FILES else ''
-        rows.append('<tr%s><td><b>%s</b> %s<br><span class="sub">%s</span></td><td class="r">%d</td><td class="r">%d</td>'
-                    '<td class="r">%d</td><td class="r">%s</td><td class="r">%s</td><td class="r">%s</td></tr>' % (
-                        hidden, esc(os.path.basename(row['path'])), repeat, esc(display_path(row['path'], cwd)),
-                        row['reads'], row['bash_reads'], row['writes'], count(row['tokens_in']),
-                        column(row['new_usd']), column(row['carried_usd'])))
-    more = ('<button id="morefiles" type="button">Show all %d files</button>' % len(files)) if len(files) > TOP_FILES else ''
-    return ('<section><h2>Files</h2><p class="sub">Files the agent read or changed, most expensive first. Tokens and costs are %s. '
-            '"Shell reads" are files read inside Bash commands (cat, head, sed and so on).</p>'
-            '<table class="files" id="filetable"><thead><tr><th>File</th><th class="r">Read tool</th><th class="r">Shell reads</th>'
-            '<th class="r">Written or edited</th><th class="r">Tokens brought in</th><th class="r">New cost</th>'
-            '<th class="r">Carried cost</th></tr></thead><tbody>%s</tbody></table>%s</section>' % (tag('est'), ''.join(rows), more))
+        rows.append('<tr%s><td><b>%s</b> %s%s</td><td class="r">%d</td><td class="r">%d</td><td class="r">%d</td>'
+                    '<td class="r">%s</td><td class="r">%s</td><td class="r">%s</td></tr>' % (
+                        hidden, esc(name), repeat, where, row['reads'], row['bash_reads'], row['writes'],
+                        count(row['tokens_in']), column(row['new_usd']), column(row['carried_usd'])))
+        csv_rows.append((name, shown, row['reads'], row['bash_reads'], row['writes'], round(row['tokens_in']),
+                         '%.6f' % row['new_usd'], '%.6f' % row['carried_usd']))
+    more = ('<button id="morefiles" type="button">Show all %s files</button>' % count(len(files))) if len(files) > TOP_FILES else ''
+    button = pg.csv_button('files', 'files.csv', ('file', 'path', 'read_tool', 'shell_reads', 'written_or_edited',
+                                                  'tokens_brought_in_est', 'new_usd_est', 'carried_usd_est'), csv_rows)
+    answer = ('Files the agent read or changed, most expensive first. Tokens and costs are %s. "Shell reads" are files read '
+              'inside Bash commands (cat, head, sed and so on).' % pg.tag('est'))
+    table = ('<table class="files" id="filetable"><thead><tr><th>File</th><th class="r">Read tool</th><th class="r">Shell reads</th>'
+             '<th class="r">Written or edited</th><th class="r">Tokens brought in</th><th class="r">New cost</th>'
+             '<th class="r">Carried cost</th></tr></thead><tbody>%s</tbody></table>%s' % (''.join(rows), more))
+    return collapsible('files', 'Which files did it touch?', answer, button + table)
 
 
 def _findings(est):
-    """The session findings. They state what happened and give no advice."""
+    """Layer 3: the session findings. They state what happened and give no advice."""
     found = est['findings']['session']
     body = ''.join('<li>%s</li>' % esc(f['sentence']) for f in found) or '<li>Nothing stood out in this session.</li>'
-    return '<section><h2>Other findings</h2><ul class="findings">%s</ul></section>' % body
+    return collapsible('findings', 'What else stood out?',
+                       'Other things the rules noticed. They say what happened, not what to do.',
+                       '<ul class="findings">%s</ul>' % body)
 
 
-def rate(value):
-    """A price per million tokens with at least two decimals: $2.00, $0.125."""
-    return ('$%.2f' % value) if round(value, 2) == value else ('$%.3f' % value)
-
-
-def _price_rows(est):
-    """The price rows used, one per model in the session."""
+def _price_keys(est):
+    """The price-table keys used, one per model in the session."""
     seen = []
     for step in est['steps']:
         key = prices.canonical_model(step['model'])
         if key and key not in seen:
             seen.append(key)
+    return seen
+
+
+def _price_table(est, pg):
+    """The prices used, per million tokens, with the date they were checked, and a CSV button."""
+    seen = _price_keys(est)
     rows = ''.join('<tr><td>%s</td><td class="r">%s</td><td class="r">%s</td><td class="r">%s</td><td class="r">%s</td>'
                    '<td class="r">%s</td><td>%s</td></tr>' % (
                        esc(prices.PRICES[k]['name']), rate(prices.PRICES[k]['input']), rate(prices.PRICES[k]['cache_write_5m']),
                        rate(prices.PRICES[k]['cache_write_1h']), rate(prices.PRICES[k]['cache_read']), rate(prices.PRICES[k]['output']),
                        'checked' if prices.PRICES[k]['validated'] else 'not yet checked against a session total')
                    for k in seen)
-    return ('<table class="legend"><tr><th>Model</th><th class="r">Input</th><th class="r">Write 5 min</th><th class="r">Write 1 h</th>'
-            '<th class="r">Re-sent</th><th class="r">Output</th><th>Against session totals</th></tr>%s</table>' % rows)
+    csv_rows = [(prices.PRICES[k]['name'], prices.PRICES[k]['input'], prices.PRICES[k]['cache_write_5m'],
+                 prices.PRICES[k]['cache_write_1h'], prices.PRICES[k]['cache_read'], prices.PRICES[k]['output'],
+                 'checked' if prices.PRICES[k]['validated'] else 'not yet checked', prices.PRICES_CHECKED) for k in seen]
+    button = pg.csv_button('prices', 'prices.csv', ('model', 'input_per_million_usd', 'write_5m_per_million_usd',
+                                                    'write_1h_per_million_usd', 'resent_per_million_usd',
+                                                    'output_per_million_usd', 'against_session_totals', 'date_checked'), csv_rows)
+    return button + ('<table class="legend"><tr><th>Model</th><th class="r">Input</th><th class="r">Write 5 min</th>'
+                     '<th class="r">Write 1 h</th><th class="r">Re-sent</th><th class="r">Output</th>'
+                     '<th>Against session totals</th></tr>%s</table>' % rows)
 
 
-def _fine_print(est):
-    """Collapsed by default: how to read the page, what is exact, prices, and known limits."""
+def _how_to_read(pg):
+    """Layer 3: how to read the page, and a glossary of every term it uses."""
+    body = ('<p>The agent works in <b>steps</b>: one call to the model, the tool calls it made, and what came back. Every call '
+            'sends the whole conversation so far. Material the model has just seen is <b>new</b>; material sent again on a later '
+            'call is <b>re-sent</b> (<b>carried</b> cost). A step\'s cost is its own output plus what its results cost to send, '
+            'now and on every later call.</p>'
+            '<p>The page has three layers: the answer at the top, the explanation under it, and the evidence in the sections that '
+            'open and close. Every number carries a small word: <b>exact</b> means it was read from the log, <b>est.</b> means '
+            'a fixed rule worked it out from the exact numbers. Colour is never the only cue; each colour sits next to its name.</p>'
+            '<h3>Glossary</h3>%s' % pg.glossary())
+    return collapsible('howto', 'How do I read this page?', 'In plain words, with every term the page uses explained.', body)
+
+
+def _gap_html(est):
+    """The paragraph about Claude Code's own session total next to the transcript total."""
     recorded, totals = est['recorded_total'], est['totals']
     if recorded and not any(recorded['gap_tokens'].values()):
-        recorded_html = ('<p><b>Session total recorded by Claude Code.</b> It matches the transcript exactly: every token it '
-                         'counted is in the transcript (%s). Claude Code\'s own dollar figure for the session is %s (it uses its own '
-                         'price table).</p>' % (money(totals['transcript_usd']), money(recorded['cost_usd_reported'])))
-    elif recorded:
+        return ('<p><b>Session total recorded by Claude Code.</b> It matches the transcript exactly: every token it '
+                'counted is in the transcript (%s). Claude Code\'s own dollar figure for the session is %s (it uses its own '
+                'price table).</p>' % (money(totals['transcript_usd']), money(recorded['cost_usd_reported'])))
+    if recorded:
         gap = _gap_share(recorded)
-        recorded_html = (
-            '<p><b>Session total recorded by Claude Code.</b> Its own record of this session\'s tokens, priced with the same table, '
-            'comes to %s to %s (the range depends on whether cache writes were 5 minute or 1 hour; the log records only the '
-            'combined count reliably). The transcript total is %s. The gap is %s to %s, or about %s of the recorded total. '
-            'It is made of calls that produce no record in the transcript. Claude Code\'s own dollar figure for the session is '
-            '%s (it uses its own price table).</p>' % (
-                money(recorded['session_total_usd_low']), money(recorded['session_total_usd_high']),
-                money(totals['transcript_usd']), money(recorded['gap_usd_low']), money(recorded['gap_usd_high']),
-                percent(gap or 0), money(recorded['cost_usd_reported'])))
-    else:
-        recorded_html = ('<p><b>Session total recorded by Claude Code.</b> This log has none yet. A session that is still running '
-                         'usually has not written one, so there is nothing to compare the transcript total with.</p>')
+        return ('<p><b>Session total recorded by Claude Code.</b> Its own record of this session\'s tokens, priced with the same table, '
+                'comes to %s to %s (the range depends on whether cache writes were 5 minute or 1 hour; the log records only the '
+                'combined count reliably). The transcript total is %s. The gap is %s to %s, or about %s of the recorded total. '
+                'It is made of calls that produce no record in the transcript. Claude Code\'s own dollar figure for the session is '
+                '%s (it uses its own price table).</p>' % (
+                    money(recorded['session_total_usd_low']), money(recorded['session_total_usd_high']),
+                    money(totals['transcript_usd']), money(recorded['gap_usd_low']), money(recorded['gap_usd_high']),
+                    percent(gap or 0), money(recorded['cost_usd_reported'])))
+    return ('<p><b>Session total recorded by Claude Code.</b> This log has none yet. A session that is still running '
+            'usually has not written one, so there is nothing to compare the transcript total with.</p>')
+
+
+def _fine_print(est, pg):
+    """Layer 3: what is exact and what is estimated, prices and their date, validation, and the known limits."""
     unvalidated = ''
     if est['models_not_validated']:
         unvalidated = '<p><b>Prices not yet checked against a session total:</b> %s. %s</p>' % (
             esc(', '.join(est['models_not_validated'])), esc(prices.NOT_VALIDATED_NOTE.capitalize() + '.'))
     bash = est['bash']
-    return ('<section><details><summary><h2 style="display:inline">Fine print</h2></summary>'
-            '<h3>How to read this page</h3><p>The agent works in <b>steps</b>: one call to the model, the tool calls it made, and what '
-            'came back. Every call sends the whole conversation so far. Material the model has just seen is <b>new</b>; material sent '
-            'again on a later call is <b>re-sent</b> (<b>carried</b> cost). A step\'s cost is its own output plus what its results '
-            'cost to send, now and on every later call.</p>'
-            '<h3>What is exact and what is estimated</h3><ul>'
-            '<li><b>Exact</b>: tokens of every model call, the total, thinking tokens, and each step\'s output cost.</li>'
+    body = ('<h3>What is exact and what is estimated</h3><ul>'
+            '<li><b>Exact</b>: tokens of every model call, the total, the largest prompt (%s tokens), thinking tokens, and each '
+            'step\'s output cost.</li>'
             '<li><b>Est.</b>: how the input bill is split between items. The log records tokens per call, not per file or per tool. '
             'Result sizes come from how much the prompt grew after each step; typed prompts are sized at %.1f characters per token.</li>'
             '<li>The split always adds back up to the exact transcript total (checked on every build: difference $%.9f).</li></ul>'
@@ -534,108 +710,79 @@ def _fine_print(est):
             '<li>Work done by subagents is added to the step that launched it, as one exact amount. It is not broken down here, '
             'and files read by subagents are not in the Files table.</li>'
             '<li>Subagents that no step launched: %s.</li>'
-            '<li>Only the main thread is drawn in "How the conversation grew".</li></ul></details></section>' % (
-                estimate.CHARS_PER_TOKEN, est['sum_back']['difference_usd'], esc(prices.PRICES_URL), esc(prices.PRICES_CHECKED),
-                _price_rows(est), recorded_html, unvalidated, count(est['skipped_pairs']), count(est['rebuilds']),
-                count(estimate.REBUILD_MIN_EXTRA), percent(bash['other_command_share']), count(bash['calls']),
-                count(len(est['unlinked_subagents']))))
+            '<li>Only the main thread is drawn in the two call-by-call charts.</li></ul>' % (
+                count(est['totals']['largest_prompt_tokens']), estimate.CHARS_PER_TOKEN, est['sum_back']['difference_usd'],
+                esc(prices.PRICES_URL), esc(prices.PRICES_CHECKED), _price_table(est, pg), _gap_html(est), unvalidated,
+                count(est['skipped_pairs']), count(est['rebuilds']), count(estimate.REBUILD_MIN_EXTRA),
+                percent(bash['other_command_share']), count(bash['calls']), count(len(est['unlinked_subagents']))))
+    return collapsible('fineprint', 'What is in the fine print?', 'The method, the prices and the date they were checked, '
+                       'how the totals were validated, and what the numbers cannot tell you.', body)
 
 
 # ---------------------------------------------------------------- the page
 
-CSS = """
-:root{--bg:#fbfaf7;--ink:#1c1f24;--muted:#5b616b;--line:#dcd8cf;--card:#fff}
-*{box-sizing:border-box}
-html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{max-width:1040px;margin:0 auto;padding:28px 20px 80px}
-h1{font-size:2.2rem;margin:0}h2{font-size:1.4rem;margin:44px 0 4px}h3{font-size:1.05rem;margin:22px 0 4px}
-.sub{color:var(--muted);margin:2px 0 12px;font-size:.95rem}.lede{font-size:1.2rem;margin:10px 0 4px}
-.note{color:var(--muted);margin:0 0 6px}.warn{background:#fff4d6;border:1px solid #e0c36a;border-radius:8px;padding:8px 12px;margin:8px 0}
-.small{color:#6b7078;font-size:.82rem;margin:6px 0 0}
-.tag{font-size:.64rem;letter-spacing:.05em;text-transform:uppercase;padding:0 6px;border-radius:99px;border:1px solid currentColor;
-white-space:nowrap;vertical-align:middle;color:#3a3f47}.tag.est{border-style:dashed}
-.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:20px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
-.num{font-size:2.5rem;font-weight:700;line-height:1.1}.lbl{color:var(--muted);font-size:.9rem;margin-top:4px}
-.headline{font-size:1.25rem;font-weight:600;margin:16px 0 0;padding:10px 14px;border-left:5px solid #1b2a49;background:#fff}
-.kindbar,.growth{width:100%;height:auto;display:block;background:var(--card);border:1px solid var(--line);border-radius:10px}
-.kindbar{border-radius:8px}.legend{border-collapse:collapse;margin-top:10px;width:100%}.legend td,.legend th{padding:3px 8px;text-align:left;font-size:.93rem}
-.kindlegend td:first-child{width:26px}.kindlegend td:nth-child(2){width:36%}.kindlegend td:nth-child(5){width:34%}
-.kindlegend tr.totalrow td{border-top:2px solid #1c1f24;padding-top:7px;font-weight:700}
-.match{color:#1d5c2e;font-weight:600}.nomatch{color:#b3261e;font-weight:700}
-.r{text-align:right!important;font-variant-numeric:tabular-nums}
-.sw,.chip,.mk{display:inline-block;vertical-align:-2px;margin-right:6px}.mk{vertical-align:-3px}
-.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
-.cardhead{display:flex;align-items:center;gap:6px;min-height:24px}.cardmoney{margin-top:2px}.cardcost{font-size:1.7rem;font-weight:700}
-.what{font-size:1.05rem;margin:6px 0 8px}.split{font-size:.85rem;color:var(--muted);margin-top:8px}.why{margin:10px 0 0}
-.costbar{width:100%;height:12px;display:block;min-width:60px;border-radius:6px}
-.legendline{margin-top:10px;font-size:.88rem;color:var(--muted)}.key{margin-right:14px;white-space:nowrap}
-.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:8px}
-select,button{font:inherit;padding:4px 10px;border:1px solid #bdb8ad;border-radius:8px;background:#fff;cursor:pointer}
-table{border-collapse:collapse;width:100%}#steps th,.files th{text-align:left;font-size:.85rem;color:var(--muted);border-bottom:2px solid var(--line);padding:6px 8px}
-#steps td,.files td{padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-tr.step{cursor:pointer}tr.step:hover{background:#f3f1ea}tr.step:focus{outline:2px solid #0077BB}
-.flag{display:inline-block;font-size:.72rem;border:1px solid #CC3311;color:#8a2208;border-radius:6px;padding:0 6px;margin-left:6px;white-space:nowrap}
-.detailbox{background:#f7f5ef;border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:.9rem}
-.detailbox ul{margin:4px 0;padding-left:20px}.findings li{margin:6px 0}
-details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
-details>summary::before{content:"\\25B8 ";font-size:1.2rem}details[open]>summary::before{content:"\\25BE "}
-@media(max-width:800px){.tiles{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}.num{font-size:2rem}}
-@page{margin:14mm}
-@media print{
-*{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-body{background:#fff;font-size:12px}main{max-width:none;padding:0}
-.controls,#morefiles,#showall{display:none!important}
-.card,.tile,tr,.keep,.detailbox,.warn,.headline,svg,.legendline{break-inside:avoid;page-break-inside:avoid}
-h2,h3,.sub{break-after:avoid;page-break-after:avoid}.keepsec{break-inside:avoid;page-break-inside:avoid}
-thead{display:table-header-group}tr.step:hover{background:none}
-.tiles{margin-top:10px;grid-template-columns:repeat(4,1fr)}.num{font-size:1.6rem}.cards{grid-template-columns:repeat(3,1fr)}
-.card{padding:10px 12px}.cardcost{font-size:1.4rem}.what{font-size:.95rem}
-}
-"""
-
-JS = """
+PAGE_JS = r"""
 (function(){
+'use strict';
+var P=window.PAGE,D=P.data,F=P.fn;
+function $(s,r){return (r||document).querySelector(s);}
+function $$(s,r){return [].slice.call((r||document).querySelectorAll(s));}
+var BADGE_E='<span class="tag exact">exact</span>',BADGE_S='<span class="tag est">est.</span>';
+F.growth_tip=function(ps){
+ var i=ps[0].dataIndex,g=D.growth,c=g.calls[i],h='<b>Call '+(i+1)+' of '+g.calls.length+'</b><br>';
+ h+='Prompt: '+F.int(c[5])+' tokens '+BADGE_E+'<br>';
+ h+='Re-sent (from the saved copy): '+F.int(c[1])+'<br>';
+ h+='New, not saved: '+F.int(c[0])+'<br>New, saved for 5 minutes: '+F.int(c[2])+'<br>New, saved for 1 hour: '+F.int(c[3])+'<br>';
+ h+='Output: '+F.int(c[4])+' tokens<br>';
+ h+='Cost of this call: '+(c[6]===null?'no public price':F.money(c[6]))+' '+BADGE_E;
+ if(g.rebuilds[i]){h+='<br><b>Cache rebuilt</b> after a pause of '+g.rebuilds[i][0]+' minutes'+(g.rebuilds[i][1]?' ('+g.rebuilds[i][1]+')':'');}
+ if(g.compacted.indexOf(i)>=0)h+='<br><b>Starts after a compaction</b>';
+ return h;
+};
+F.running_tip=function(ps){
+ var i=ps[0].dataIndex,r=D.running,t=r.top[String(i)];
+ var h='<b>Call '+(i+1)+' of '+r.calls.length+'</b><br>This call: '+F.money(r.calls[i])+' '+BADGE_E+'<br>Running total: '+F.money(ps[0].data)+' '+BADGE_E;
+ if(t)h+='<br><b>#'+t[0]+' costliest</b>: step '+t[1]+', '+t[2]+', '+F.money(t[3])+' '+BADGE_S;
+ return h;
+};
+P.start();
+/* the table of every step: search, sort, kind filter, top 50 then show all, row detail */
 var body=document.getElementById('stepbody');
 if(body){
- var rows=[].slice.call(body.querySelectorAll('tr.step')),limit=parseInt(body.getAttribute('data-limit'),10),showAll=rows.length<=limit;
+ var rows=$$('tr.step',body),limit=parseInt(body.getAttribute('data-limit'),10),showAll=rows.length<=limit;
  rows.forEach(function(r){r._d=r.nextElementSibling;});
- var sortSel=document.getElementById('sort'),kindSel=document.getElementById('kind'),btn=document.getElementById('showall'),shown=document.getElementById('shown');
- function num(r,k){return parseFloat(r.getAttribute(k));}
- function apply(){
-  var byCost=sortSel.value==='cost';
-  rows.sort(function(a,b){return byCost?(num(b,'data-cost')-num(a,'data-cost'))||(num(a,'data-order')-num(b,'data-order')):num(a,'data-order')-num(b,'data-order');});
+ var sortSel=$('#sort'),kindSel=$('#kind'),search=$('#search'),btn=$('#showall'),shown=$('#shown');
+ var number=function(r,k){return parseFloat(r.getAttribute(k));};
+ var apply=function(){
+  var byCost=sortSel.value==='cost',q=search.value.trim().toLowerCase(),narrowed=q!==''||kindSel.value!=='all';
+  rows.sort(function(a,b){return byCost?(number(b,'data-cost')-number(a,'data-cost'))||(number(a,'data-order')-number(b,'data-order')):number(a,'data-order')-number(b,'data-order');});
   var n=0;
   rows.forEach(function(r){
    body.appendChild(r);body.appendChild(r._d);
-   var ok=(kindSel.value==='all'||r.getAttribute('data-kind')===kindSel.value)&&(showAll||parseInt(r.getAttribute('data-rank'),10)<=limit);
+   var ok=(kindSel.value==='all'||r.getAttribute('data-kind')===kindSel.value)&&(q===''||r.getAttribute('data-text').indexOf(q)>=0)&&(showAll||narrowed||parseInt(r.getAttribute('data-rank'),10)<=limit);
    r.hidden=!ok;if(!ok){r._d.hidden=true;r.setAttribute('aria-expanded','false');}else{n++;}
   });
-  shown.textContent=showAll?('Showing '+n+' of '+rows.length+' steps'):('Showing the '+limit+' most expensive of '+rows.length+' steps');
+  shown.textContent=(showAll||narrowed)?('Showing '+F.int(n)+' of '+F.int(rows.length)+' steps'):('Showing the '+limit+' most expensive of '+F.int(rows.length)+' steps');
   btn.hidden=showAll;
- }
- function toggle(r){r._d.hidden=!r._d.hidden;r.setAttribute('aria-expanded',String(!r._d.hidden));}
+ };
+ var toggle=function(r){r._d.hidden=!r._d.hidden;r.setAttribute('aria-expanded',String(!r._d.hidden));};
  rows.forEach(function(r){r.addEventListener('click',function(){toggle(r);});r.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle(r);}});});
- sortSel.addEventListener('change',apply);kindSel.addEventListener('change',apply);
+ sortSel.addEventListener('change',apply);kindSel.addEventListener('change',apply);search.addEventListener('input',apply);
  btn.addEventListener('click',function(){showAll=true;apply();});apply();
 }
 var more=document.getElementById('morefiles');
-if(more){more.addEventListener('click',function(){[].slice.call(document.querySelectorAll('#filetable tr.extra')).forEach(function(r){r.hidden=false;});more.hidden=true;});}
+if(more){more.addEventListener('click',function(){$$('#filetable tr.extra').forEach(function(r){r.hidden=false;});more.hidden=true;});}
 })();
 """
 
 
 def render(est):
     """The whole page as one string."""
+    pg = Page()
     title = 'Receipt: %s, %s' % (est['session']['project'], when(est['session']['started']))
-    return ('<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
-            '<meta name="viewport" content="width=device-width, initial-scale=1"><title>%s</title>'
-            '<style>%s</style><noscript><style>tr.detail{display:table-row!important}</style></noscript></head><body><main>%s%s%s%s%s%s%s%s%s%s'
-            '</main><script>%s</script></body></html>\n' % (
-                esc(title), CSS, _top(est), _tiles(est), _headline(est), _where(est), _cards(est), _growth(est), _steps(est),
-                _files(est), _findings(est), _fine_print(est), JS))
+    body = ''.join([_top(est, pg), _headline(est, pg), _tiles(est, pg), _where(est, pg), _cards(est, pg), _growth(est, pg),
+                    _running(est, pg), _steps(est, pg), _files(est, pg), _findings(est), _how_to_read(pg), _fine_print(est, pg)])
+    return pg.shell(title, body, PAGE_JS)
 
 
 # ---------------------------------------------------------------- command line
@@ -705,7 +852,7 @@ def main(argv=None, out=None):
             est = build(session_path)
             html_path = _target_path(args.out, '.receipt.html', est['session']['session_id'])
         _write(html_path, render(est))
-    except (FileNotFoundError, estimate.ReceiptError) as error:
+    except (FileNotFoundError, estimate.ReceiptError, page.PageError) as error:
         print('error: %s' % error, file=sys.stderr)
         return 2
     if args.json is not None:
