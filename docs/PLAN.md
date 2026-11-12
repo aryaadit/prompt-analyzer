@@ -90,8 +90,11 @@ screen is a stretch goal. Only start it if the evidence is in by December 2.
 - Can `api-request` tail hashes be resolved to give exact per-message sizes? (SCHEMA open
   question 4.) This would replace the growth-method estimates for tool results.
 - The price page shows display names, not API ids, and no "last updated" date. We map log ids
-  to names by convention (`claude-fable-5-1` is "Claude Fable 5.1"). Recheck the page before
-  the experiments on Nov 26.
+  to names by convention (`claude-fable-5-1` is "Claude Fable 5.1"). The mapping is confirmed
+  against `costUSD` for `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-fable-5-1` (9 entries,
+  779 calls), and `claude-opus-4-8` (1 entry, 6 calls). It is not yet confirmed for
+  `claude-fable-5`, `claude-fable-5-2`, `claude-haiku-5-5`, or `claude-haiku-4-5`. Recheck the
+  page before the experiments on Nov 26.
 - Presentation length. The Session 2 slides say 5 minutes in a 7-minute slot. The syllabus
   says 7 minutes plus Q&A. Confirm with the professors.
 - We switched project type to Build It for Yourself after Session 2. Mention it to the professors.

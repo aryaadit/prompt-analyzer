@@ -1,5 +1,8 @@
 # Agent rules for this repo
 
+**Start here:** read `docs/GAME-PLAN.md` first. It is the project plan (goal, schedule, roles,
+what is built and what is next). Then read the rest of this file.
+
 ## What this project is
 
 Prompt Analyzer reads the session logs that coding agents write to disk and turns them into

@@ -14,6 +14,11 @@ TOKEN_TYPES = ('input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'outpu
 # Dollars per million tokens: input, cache_write_5m, cache_write_1h, cache_read, output.
 # The page lists display names only. Log ids are mapped to display names by naming convention
 # (for example claude-fable-5-1 is "Claude Fable 5.1"). Ids with no row here have no public price.
+# Checked on 2026-11-12 against cost-state costUSD, on the 71 entries whose transcript reconciles
+# exactly: claude-sonnet-5-5 (28 entries), claude-opus-5-5 (33), claude-fable-5-1 (9 entries,
+# 779 calls), claude-opus-4-8 (1 entry, 6 calls) all matched to rounding error. These rows have
+# NOT been checked that way, because no exactly reconciling entry uses them: claude-fable-5-2,
+# claude-fable-5, claude-haiku-5-5, claude-haiku-4-5. Rerun `python3 -m src.audit prices` to refresh.
 _ROWS = {
     'claude-fable-5-2': ('Claude Fable 5.2', 8, 10, 16, 0.20, 40),
     'claude-fable-5-1': ('Claude Fable 5.1', 10, 12.50, 20, 0.25, 50),

@@ -1,6 +1,7 @@
 # Claude Code session log schema
 
-Last inspected: November 12, 2026. Written for the parser prompt.
+Last inspected: November 12, 2026. Written for the parser prompt. Open questions 1 and 2
+updated the same day, after the parser and price table were built.
 
 This document describes **structure only**: record types, field names, types, counts, and
 token numbers. No prompt text, file contents, or tool output was copied here. Inspection
@@ -161,6 +162,12 @@ read from the log, but it is not a bill. Label it **API-equivalent**.
 
 ### Other usage details
 
+- `cost-state`'s own `cacheCreationEphemeral5mInputTokens` and `...1hInputTokens` are
+  incomplete: they sum to `cacheCreationInputTokens` in only 83 of 148 entries, and equal the
+  transcript's split in 38 of the 71 exactly reconciling entries. Only the combined count is
+  reliable. `costUSD` is still reproduced exactly (71 of 71) by pricing each call with its own
+  per-call split from `message.usage.cache_creation`.
+
 - `iterations[].type` is `message` (36,199) or `fallback_message` (4). A fallback appears to be a
   model refusal rerouting a call to another model (inferred from the field names, not
   confirmed); the `system/model_refusal_fallback` record names `originalModel` and
@@ -319,12 +326,22 @@ growth, which means context was cleared or compacted between calls; skip those.
 
 ## 12. Open questions
 
-1. **The 76 unreconciled (session, model) entries.** `cost-state` exceeds the deduplicated
-   transcript even after adding subagent and workflow files. Is the gap helper-model calls,
-   workflows launched from other sessions, resumed sessions, or something else?
-2. **Is `cost-state` cumulative or per segment?** 10 of 83 sessions have more than one
-   `cost-state` record. Taking the last one worked for the exact matches, but the reset
-   behavior is unconfirmed.
+1. **The 76 unreconciled (session, model) entries.** *Answered Nov 12, cause still unconfirmed.*
+   A re-run counted 148 entries, 77 unreconciled (the live session added one). 41 of the 77 are
+   models with no transcript call, even with subagent and workflow files added; they are about
+   $1.22 of API-equivalent dollars, 0.02 percent of the total. The other 36 are the main models
+   (Opus, Fable, Sonnet) and in all 36 `cost-state` is above the transcript, never below.
+   Priced on one yardstick (our price table on both sides, every cache write at the 5-minute
+   or the 1-hour rate), the gap is 8.0 to 8.3 percent of all session-total dollars: 9.7 to 10.2
+   percent in sessions with a `compact_boundary` and 0.5 to 0.6 percent in sessions without.
+   Compaction tracks it: 23 of 32 entries in compacted sessions have a gap, against 13 of 75
+   in the rest. Not the cause: `usage.iterations` (never differs from top-level usage across
+   41,077 calls). A call that writes no `assistant` record, such as the compaction summary
+   call, is the leading guess and is untested.
+2. **Is `cost-state` cumulative or per segment?** *Answered Nov 12: cumulative.* In all 10
+   sessions with more than one record, no per-model token count and no total cost ever
+   decreases, and `startTime` never changes. Where the transcript reconciles, the last record
+   matches it and the sum of all records never does. Take the last record.
 3. **Does top-level `usage` include `fallback_message` iterations?** Only 4 cases. Needed to
    avoid under- or over-counting after a refusal fallback.
 4. **Can `tail` hashes be resolved?** Only about 31% match a blob in the same file. If the rest

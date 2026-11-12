@@ -6,6 +6,9 @@ Group project for B8609 Generative AI for Business (Columbia Business School, Fa
 Track: Build It for Yourself. Team: Adit Arya, Anna Liedtke, Reid Yankowski.
 Presentation: Wednesday, December 9, 2026.
 
+**New here? Read [`docs/GAME-PLAN.md`](docs/GAME-PLAN.md) first.** It is the project plan: goal,
+schedule, roles, and what is built.
+
 ## What it does
 
 1. **Receipt.** Reads a Claude Code session log and lists every file, search, and tool call with its token cost.
@@ -14,7 +17,21 @@ Presentation: Wednesday, December 9, 2026.
 
 ## Status
 
-Week 1. Nothing is built yet. Start with `prompts/01-git-setup.md`, then `prompts/02-inspect-logs.md`.
+Week 1. The exact layer is built: a parser, a price table, and a plain-text cost summary for
+one Claude Code session. Per-step estimates and the HTML receipt come next (prompt 4).
+
+## Run it
+
+From the repo root. Python 3 only, nothing to install.
+
+```
+python3 -m src.summarize --session latest [--json [path]]   # summary of your latest session here
+python3 -m src.audit all                                    # gap and price check across all your sessions
+python3 -m unittest                                         # run the tests
+```
+
+A live session usually has no session total yet (Claude Code writes it later), so the summary
+shows the transcript total only and says so.
 
 ## Layout
 
@@ -22,10 +39,13 @@ Week 1. Nothing is built yet. Start with `prompts/01-git-setup.md`, then `prompt
 |---|---|
 | `AGENTS.md` | Rules every coding agent follows in this repo |
 | `CLAUDE.md` | Points Claude Code at `AGENTS.md` |
-| `docs/PLAN.md` | Timeline, experiment design, risks, roles |
+| `docs/GAME-PLAN.md` | The project plan: goal, schedule, roles. Read first |
+| `docs/PLAN.md` | Timeline, experiment design, risks, open questions |
+| `docs/SCHEMA.md` | How Claude Code session logs are structured |
 | `docs/AI-USAGE.md` | Running note of how we used AI (course policy) |
 | `prompts/` | The prompts we give the coding agent, in order |
-| `src/` | Parser, receipt builder, rematch runner |
+| `src/` | Parser, price table, summary, audit (rematch runner later) |
+| `tests/` | Unit tests, with synthetic fixtures under `tests/fixtures/` |
 | `skill/` | The packaged skill (later) |
 | `experiments/` | Task definitions and results tables |
 | `samples/`, `runs/`, `reports/` | Local only. Never committed |
